@@ -3,7 +3,8 @@ import Candlestick from "./Candlestick.jsx";
 import IndicatorToggles from "./IndicatorToggles.jsx";
 import { DEFAULT_ACTIVE, sanitizeActive } from "./indicatorConfig.js";
 import { loadKey, saveKey } from "./storage.js";
-import { IndicatorsPanel, NewsPanel, AutopilotPanel } from "./Autopilot.jsx";
+import { IndicatorsPanel, NewsPanel, AutopilotPanel, GreeksPanel, DivergencePanel } from "./Autopilot.jsx";
+import SummaryPanel from "./SummaryPanel.jsx";
 
 const CASH_START = 10000;
 const POLL_DEFAULT = 60; // seconds
@@ -54,6 +55,9 @@ export default function App() {
   const [pollCount, setPollCount] = useState(0);
   const [indicators, setIndicators] = useState(null); // { series, latest, composite }
   const [indError, setIndError] = useState(null);
+  const [greeksData, setGreeksData] = useState(null); // /api/greeks: enriched chains + summary + preview
+  const [signalData, setSignalData] = useState(null); // /api/signal: scores + options factors
+  const [greeksError, setGreeksError] = useState(null);
   const [activeInd, setActiveInd] = useState(() => sanitizeActive(loadKey(K_INDICATORS, DEFAULT_ACTIVE)));
   const pollRef = useRef(null);
   const chainsRef = useRef({}); // { [expiration]: {strikes:[...]} } from the last snapshot pull
@@ -93,6 +97,32 @@ export default function App() {
         setIndError(null);
       } catch (e) {
         if (!cancelled) setIndError(e.message);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pollCount]);
+
+  // Options analysis refreshes on the same poll cadence as the snapshot. The chain
+  // table reuses this data to highlight the strikes the autopilot would pick.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const fetchJson = async (path) => {
+          const res = await fetch(`${SERVER_URL}${path}`);
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.error || `Server returned ${res.status}`);
+          return data;
+        };
+        const [g, sig] = await Promise.all([fetchJson("/api/greeks"), fetchJson("/api/signal")]);
+        if (cancelled) return;
+        setGreeksData(g);
+        setSignalData(sig);
+        setGreeksError(null);
+      } catch (e) {
+        if (!cancelled) setGreeksError(e.message);
       }
     })();
     return () => {
@@ -254,6 +284,8 @@ export default function App() {
         .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.6); display:flex; align-items:center; justify-content:center; z-index:10; }
         .modal { background:#14171A; border:1px solid #2A2F35; border-radius:10px; padding:20px; width:280px; }
         .err { background:#3B1717; border:1px solid #6B1E1E; color:#FF9B9B; padding:8px 12px; border-radius:6px; font-size:13px; margin-bottom:14px; }
+        .summary p { margin:4px 0 0; font-size:13px; line-height:1.6; color:#C9CDD1; }
+        .summary .sub { font-weight:600; color:#E7E9EA; font-size:13px; margin-top:12px; }
         .trade-log { max-height:220px; overflow-y:auto; }
       `}</style>
 
@@ -315,6 +347,8 @@ export default function App() {
         </div>
       </div>
 
+      <SummaryPanel quote={quote} greeks={greeksData} signal={signalData} />
+
       <div className="grid">
         <div className="card">
           <div className="row" style={{ justifyContent: "space-between" }}>
@@ -337,9 +371,14 @@ export default function App() {
             </div>
           )}
           {chain && !chainLoading && (() => {
-            // greek columns only appear when the snapshot actually carries greeks (schema v2
-            // or server-computed) — v1 snapshots render the original table untouched
-            const hasGreeks = chain.strikes.some((s) => s.call?.delta != null || s.put?.delta != null);
+            // prefer the server-enriched chain (computed greeks/IV) when available for this
+            // expiration; fall back to the raw snapshot rows otherwise
+            const view = greeksData?.chains?.[selectedExp] ?? chain;
+            const hasGreeks = view.strikes.some((s) => s.call?.delta != null || s.put?.delta != null);
+            // highlight the strikes the autopilot would buy (only for the expiration it analyzed)
+            const preview = greeksData?.preview?.expiration === selectedExp ? greeksData.preview : null;
+            const pickOf = (strike) =>
+              preview?.call?.strike === strike ? "call" : preview?.put?.strike === strike ? "put" : null;
             const sideTip = (q) =>
               [
                 q?.theta != null && `θ ${q.theta.toFixed(3)}/day`,
@@ -359,8 +398,12 @@ export default function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {chain.strikes.map((s) => (
-                    <tr key={s.strike}>
+                  {view.strikes.map((s) => (
+                    <tr
+                      key={s.strike}
+                      style={pickOf(s.strike) ? { background: "rgba(76,141,255,.07)" } : undefined}
+                      title={pickOf(s.strike) ? `autopilot ${pickOf(s.strike)} pick (${preview[pickOf(s.strike)].mode})` : undefined}
+                    >
                       {hasGreeks && <td className="mono" title={sideTip(s.call)}>{s.call?.delta != null ? s.call.delta.toFixed(2) : "–"}</td>}
                       {hasGreeks && <td className="mono">{s.call?.iv != null ? (s.call.iv * 100).toFixed(0) + "%" : "–"}</td>}
                       <td className="mono">{s.call.bid.toFixed(2)}/{s.call.ask.toFixed(2)}</td>
@@ -421,10 +464,14 @@ export default function App() {
       </div>
 
       <div className="grid" style={{ marginTop: 16 }}>
-        <AutopilotPanel />
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <AutopilotPanel />
+          <GreeksPanel greeks={greeksData} signal={signalData} error={greeksError} />
+        </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <IndicatorsPanel data={indicators} error={indError} />
           <NewsPanel pollKey={pollCount} />
+          <DivergencePanel signal={signalData} error={greeksError} />
         </div>
       </div>
 

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { narrateAutopilot } from "./narrator.js";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:8787";
 const fmt$ = (n) => (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -10,6 +11,8 @@ async function api(path, opts) {
   if (!res.ok) throw new Error(data.error || `Server returned ${res.status}`);
   return data;
 }
+
+const sentClass = (s) => (s === "positive" || s === "bullish" ? "green" : s === "negative" || s === "bearish" ? "red" : "amber");
 
 function scoreColor(score) {
   if (score >= 12) return "green";
@@ -78,13 +81,14 @@ export function NewsPanel({ pollKey }) {
     load(false);
   }, [load, pollKey]);
 
-  const sentClass = (s) => (s === "positive" || s === "bullish" ? "green" : s === "negative" || s === "bearish" ? "red" : "amber");
-
   return (
     <div className="card">
       <div className="row" style={{ justifyContent: "space-between" }}>
-        <div className="section-title" style={{ margin: 0 }}>Market news</div>
+        <div className="section-title" style={{ margin: 0 }}>QQQ-relevant news</div>
         <div className="row">
+          {data?.analysisMode === "gemini" && (
+            <span className="mono" style={{ color: "#4C8DFF", fontSize: 10, fontWeight: 600 }}>GEMINI</span>
+          )}
           {data?.overall && (
             <span className={`mono ${sentClass(data.overall.sentiment)}`} style={{ fontSize: 12, fontWeight: 600 }}>
               {data.overall.sentiment.toUpperCase()} ({data.overall.score > 0 ? "+" : ""}{data.overall.score})
@@ -95,21 +99,188 @@ export function NewsPanel({ pollKey }) {
       </div>
       {error && <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>{error}</div>}
       <div className="trade-log" style={{ marginTop: 10 }}>
-        {(data?.relevantItems?.length ? data.relevantItems : data?.items ?? []).slice(0, 20).map((item, i) => (
+        {(data?.relevantItems ?? []).slice(0, 20).map((item, i) => (
           <div key={i} style={{ padding: "6px 0", borderBottom: "1px solid #1A1D21" }}>
-            <a href={item.link} target="_blank" rel="noreferrer" style={{ color: "#E7E9EA", textDecoration: "none", fontSize: 13 }}>
+            <a
+              href={item.link}
+              target="_blank"
+              rel="noreferrer"
+              title={item.aiReason || undefined}
+              style={{ color: "#E7E9EA", textDecoration: "none", fontSize: 13 }}
+            >
               {item.title}
             </a>
             <div className="row" style={{ marginTop: 2, fontSize: 11 }}>
+              {item.relevanceScore != null && (
+                <span className="mono muted" style={{ border: "1px solid #2A2F35", borderRadius: 4, padding: "0 4px" }}>
+                  R{item.relevanceScore}
+                </span>
+              )}
               <span className="muted">{item.source}</span>
-              <span className={sentClass(item.sentiment)}>{item.sentiment}</span>
+              <span className={sentClass(item.direction ?? item.sentiment)}>{item.direction ?? item.sentiment}</span>
+              {item.analysisSource === "gemini" && (
+                <span className="mono" style={{ color: "#4C8DFF", fontSize: 10 }}>AI</span>
+              )}
               {item.publishedAt && <span className="muted">{new Date(item.publishedAt).toLocaleTimeString()}</span>}
             </div>
           </div>
         ))}
+        {data?.items?.length > 0 && !data?.relevantItems?.length && (
+          <div className="muted" style={{ fontSize: 12 }}>
+            No QQQ-relevant headlines right now (relevance ≥ 25) — {data.items.length} headlines scanned.
+          </div>
+        )}
         {!data?.items?.length && !error && <div className="muted">Loading news…</div>}
       </div>
     </div>
+  );
+}
+
+// Presentational: compares news direction against options-market positioning.
+// Fed from signalData.newsVsOptions, which App.jsx already fetches each poll.
+export function DivergencePanel({ signal, error }) {
+  const nvo = signal?.newsVsOptions;
+  const verdictStyle =
+    nvo?.verdict === "aligned" ? "green" : nvo?.verdict === "divergent" ? "amber" : "muted";
+  const biasLabel = (bias) =>
+    bias > 15 ? "bullish positioning" : bias < -15 ? "pricing downside" : "balanced";
+  const pct = (x, dp = 1) => (x == null ? "—" : (x * 100).toFixed(dp));
+
+  return (
+    <div className="card">
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <div className="section-title" style={{ margin: 0 }}>News vs options</div>
+        {nvo && (
+          <span className={`mono ${verdictStyle}`} style={{ fontSize: 12, fontWeight: 600 }}>
+            {nvo.verdict.toUpperCase()}
+          </span>
+        )}
+      </div>
+      {error && <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>{error}</div>}
+      {!nvo && !error && <div className="muted" style={{ marginTop: 8 }}>Loading…</div>}
+      {nvo && (
+        <>
+          <div className="mono" style={{ fontSize: 12, marginTop: 10 }}>
+            news <span className={sentClass(nvo.newsSentiment)}>{nvo.newsScore > 0 ? "+" : ""}{nvo.newsScore} ({nvo.newsSentiment})</span>
+            <span className="muted"> vs </span>
+            options <span className={nvo.optionsBias > 15 ? "green" : nvo.optionsBias < -15 ? "red" : "amber"}>
+              {nvo.optionsBias > 0 ? "+" : ""}{nvo.optionsBias} ({biasLabel(nvo.optionsBias)})
+            </span>
+          </div>
+          <table style={{ marginTop: 10 }}>
+            <tbody>
+              <tr>
+                <td className="muted" style={{ textAlign: "left" }}>25Δ IV skew (put − call)</td>
+                <td className="mono">{nvo.factors ? `${pct(nvo.factors.ivSkew)} pts` : "—"}</td>
+              </tr>
+              <tr>
+                <td className="muted" style={{ textAlign: "left" }}>Put/Call open interest</td>
+                <td className="mono">{nvo.factors?.oiRatio?.toFixed(2) ?? "—"}</td>
+              </tr>
+              <tr>
+                <td className="muted" style={{ textAlign: "left" }}>ATM implied vol</td>
+                <td className="mono">{nvo.factors?.atmIv != null ? pct(nvo.factors.atmIv, 0) + "%" : "—"}</td>
+              </tr>
+              <tr>
+                <td className="muted" style={{ textAlign: "left" }}>News sample</td>
+                <td className="mono">{nvo.sampleSize} headlines</td>
+              </tr>
+            </tbody>
+          </table>
+          <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>{nvo.implication}</div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Presentational: App.jsx owns the /api/greeks + /api/signal fetches so this panel
+// and the chain-table pick highlighting share one request per poll.
+export function GreeksPanel({ greeks, signal, error }) {
+  const shell = (body) => (
+    <div className="card">
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <div className="section-title" style={{ margin: 0 }}>Options analysis</div>
+        {signal && Number.isFinite(signal.optionsScore) && (
+          <span className={`mono ${signal.optionsScore <= -40 ? "red" : signal.optionsScore < 0 ? "amber" : "green"}`} style={{ fontSize: 12, fontWeight: 600 }}>
+            {signal.optionsScore === 0 ? "CONDITIONS CLEAR" : `CONDITIONS ${signal.optionsScore.toFixed(1)}`}
+          </span>
+        )}
+      </div>
+      {body}
+    </div>
+  );
+  if (error) return shell(<div className="muted" style={{ fontSize: 12, marginTop: 8 }}>{error}</div>);
+  if (!greeks || !signal) return shell(<div className="muted" style={{ marginTop: 8 }}>Loading…</div>);
+
+  const factors = signal.optionsFactors;
+  const exp = factors?.expiration ?? greeks.preview?.expiration ?? null;
+  const quality = exp ? greeks.summary?.[exp] : null;
+  const penalties = factors?.penalties;
+  const base = signal.techScore * 0.75 + signal.newsScore * 0.25;
+  const multiplier = 1 + (signal.optionsScore ?? 0) / 200;
+  const actionCls = signal.action === "buy_call" ? "green" : signal.action === "buy_put" ? "red" : "amber";
+  const pct = (x, dp = 1) => (x == null ? "—" : (x * 100).toFixed(dp) + "%");
+
+  const pickRow = (label, p, cls) => (
+    <tr>
+      <td className="muted" style={{ textAlign: "left" }}>{label}</td>
+      {p?.strike != null ? (
+        <td className="mono">
+          <span className={cls}>{p.strike}{label === "Call pick" ? "C" : "P"}</span>
+          {p.mid != null && ` @ ${p.mid.toFixed(2)}`}
+          {p.delta != null && ` · Δ${p.delta.toFixed(2)}`}
+          {p.iv != null && ` · IV ${pct(p.iv, 0)}`}
+          <span className="muted"> ({p.mode})</span>
+        </td>
+      ) : (
+        <td className="mono muted">{p?.mode ?? "—"}</td>
+      )}
+    </tr>
+  );
+
+  return shell(
+    <>
+      <div className="mono" style={{ fontSize: 12, marginTop: 10, lineHeight: 1.7 }}>
+        tech {signal.techScore.toFixed(1)}×0.75 + news {signal.newsScore.toFixed(1)}×0.25 = {base.toFixed(1)}
+        <span className="muted"> → dampener ×{multiplier.toFixed(3)} → </span>
+        <span style={{ fontWeight: 600 }}>{signal.combinedScore.toFixed(1)}</span>
+        <span className={actionCls} style={{ fontWeight: 600 }}> {signal.action.replace("_", " ").toUpperCase()}</span>
+      </div>
+      <table style={{ marginTop: 10 }}>
+        <tbody>
+          <tr><td className="muted" style={{ textAlign: "left" }}>Expiration analyzed</td><td className="mono">{exp ?? "—"}</td></tr>
+          <tr>
+            <td className="muted" style={{ textAlign: "left" }}>ATM implied vol</td>
+            <td className={`mono ${penalties?.iv > 0 ? "amber" : ""}`}>{pct(quality?.atmIv)}{penalties?.iv > 0 && ` (−${penalties.iv})`}</td>
+          </tr>
+          <tr>
+            <td className="muted" style={{ textAlign: "left" }}>Avg bid/ask spread</td>
+            <td className={`mono ${penalties?.spread > 0 ? "amber" : ""}`}>{pct(quality?.avgSpreadPct, 2)}{penalties?.spread > 0 && ` (−${penalties.spread})`}</td>
+          </tr>
+          <tr>
+            <td className="muted" style={{ textAlign: "left" }}>ATM theta burn</td>
+            <td className="mono">{quality?.dailyThetaPctAtm != null ? pct(quality.dailyThetaPctAtm) + "/day" : "—"}</td>
+          </tr>
+          <tr>
+            <td className="muted" style={{ textAlign: "left" }}>Liquidity (open interest)</td>
+            <td className={`mono ${quality?.liquidityOk === false ? "red" : "green"}`}>
+              {quality?.liquidityOk === false ? `THIN (−${penalties?.oi ?? 20})` : "OK"}
+            </td>
+          </tr>
+          {pickRow("Call pick", greeks.preview?.call, "green")}
+          {pickRow("Put pick", greeks.preview?.put, "red")}
+        </tbody>
+      </table>
+      {quality?.flags?.length > 0 && (
+        <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
+          ⚠ {quality.flags.slice(0, 4).join(" · ")}
+        </div>
+      )}
+      <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
+        Greeks {greeks.schemaVersion >= 2 ? "from Robinhood" : "computed via Black-Scholes from quotes"} · r={greeks.riskFreeRate}
+      </div>
+    </>
   );
 }
 
@@ -190,6 +361,8 @@ export function AutopilotPanel() {
           </button>
         </div>
       </div>
+
+      <div className="muted" style={{ fontSize: 12, marginTop: 8, lineHeight: 1.5 }}>{narrateAutopilot(status)}</div>
 
       {error && <div className="err" style={{ marginTop: 10 }}>{error}</div>}
 

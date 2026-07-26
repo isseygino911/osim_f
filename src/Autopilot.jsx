@@ -28,14 +28,14 @@ export function IndicatorsPanel({ data, error }) {
 
   const { latest, composite } = data;
   const rows = [
-    ["RSI (14)", latest.rsi14?.toFixed(1), latest.rsi14 < 30 ? "green" : latest.rsi14 > 70 ? "red" : ""],
+    ["RSI (14)", latest.rsi14?.toFixed(1), Number.isFinite(latest.rsi14) && latest.rsi14 < 30 ? "green" : Number.isFinite(latest.rsi14) && latest.rsi14 > 70 ? "red" : ""],
     ["MACD", latest.macd?.toFixed(2), latest.macd > latest.macdSignal ? "green" : "red"],
     ["MACD signal", latest.macdSignal?.toFixed(2), ""],
-    ["SMA 20 / 50", `${latest.sma20?.toFixed(1)} / ${latest.sma50?.toFixed(1)}`, latest.sma20 > latest.sma50 ? "green" : "red"],
+    ["SMA 20 / 50", `${latest.sma20?.toFixed(1)} / ${latest.sma50?.toFixed(1)}`, Number.isFinite(latest.sma20) && Number.isFinite(latest.sma50) ? (latest.sma20 > latest.sma50 ? "green" : "red") : ""],
     ["Bollinger", `${latest.bbLower?.toFixed(1)} – ${latest.bbUpper?.toFixed(1)}`, ""],
     ["VWAP", latest.vwap?.toFixed(2), latest.price > latest.vwap ? "green" : "red"],
     ["ATR (14)", latest.atr14?.toFixed(2), ""],
-    ["Stochastic %K", latest.stochK?.toFixed(1), latest.stochK < 20 ? "green" : latest.stochK > 80 ? "red" : ""],
+    ["Stochastic %K", latest.stochK?.toFixed(1), Number.isFinite(latest.stochK) && latest.stochK < 20 ? "green" : Number.isFinite(latest.stochK) && latest.stochK > 80 ? "red" : ""],
   ];
 
   return (
@@ -64,16 +64,24 @@ export function NewsPanel({ pollKey }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
+  // sequence guard: the poll effect and the manual Refresh button can both have a
+  // request in flight at once (each /api/news call can take up to ~8s), so track
+  // which call is the latest and drop any response that resolves after it, the
+  // same "cancelled" guard used for App.jsx's data-fetching effects
+  const requestIdRef = useRef(0);
 
   const load = useCallback(async (refresh) => {
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     try {
-      setData(await api(`/api/news${refresh ? "?refresh=1" : ""}`));
+      const result = await api(`/api/news${refresh ? "?refresh=1" : ""}`);
+      if (requestIdRef.current !== requestId) return;
+      setData(result);
       setError(null);
     } catch (e) {
-      setError(e.message);
+      if (requestIdRef.current === requestId) setError(e.message);
     } finally {
-      setLoading(false);
+      if (requestIdRef.current === requestId) setLoading(false);
     }
   }, []);
 

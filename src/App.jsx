@@ -61,6 +61,7 @@ export default function App() {
   const [activeInd, setActiveInd] = useState(() => sanitizeActive(loadKey(K_INDICATORS, DEFAULT_ACTIVE)));
   const pollRef = useRef(null);
   const chainsRef = useRef({}); // { [expiration]: {strikes:[...]} } from the last snapshot pull
+  const selectedExpRef = useRef(selectedExp); // always-current mirror of selectedExp for async closures below
 
   // initial load from storage
   useEffect(() => {
@@ -134,6 +135,12 @@ export default function App() {
     setActiveInd((cur) => (cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key]));
   }, []);
 
+  // keep selectedExpRef current so async continuations (pullSnapshot) can read the
+  // latest user selection instead of whatever was captured when they started
+  useEffect(() => {
+    selectedExpRef.current = selectedExp;
+  }, [selectedExp]);
+
   const pullSnapshot = useCallback(async () => {
     setChainLoading(true);
     try {
@@ -160,7 +167,11 @@ export default function App() {
         return exps.find((d) => chains[d]) ?? exps[0] ?? null;
       });
       setChain((cur) => {
-        const activeExp = selectedExp && exps.includes(selectedExp) ? selectedExp : exps.find((d) => chains[d]) ?? exps[0];
+        // read the latest selection via ref, not the `selectedExp` captured when this
+        // async call started — otherwise an in-flight poll can overwrite a chain the
+        // user has since switched away from with stale data for the old expiration
+        const currentExp = selectedExpRef.current;
+        const activeExp = currentExp && exps.includes(currentExp) ? currentExp : exps.find((d) => chains[d]) ?? exps[0];
         return activeExp && chains[activeExp] ? chains[activeExp] : cur;
       });
 

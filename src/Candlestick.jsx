@@ -150,6 +150,17 @@ export default function Candlestick({ bars, height = 280, series = null, active 
   // unmount safety net: cancel any drag still in flight
   useEffect(() => () => activeResizeRef.current?.(), []);
 
+  // resync chart width on window resize — the render-time check below only fires
+  // when something else causes a re-render, so a resize with no other state change
+  // would otherwise leave the SVG at its stale width
+  useEffect(() => {
+    function onResize() {
+      if (outerRef.current) setWidth(outerRef.current.clientWidth || width);
+    }
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [width]);
+
   // Drag vertically anywhere inside a pane to grow/shrink it — the plotted
   // content stretches to fill the new height, so e.g. the RSI wave reads more
   // dramatically the taller you make its pane.

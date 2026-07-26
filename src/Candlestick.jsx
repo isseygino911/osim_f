@@ -9,6 +9,10 @@ const GRID = "#1A1D21";
 
 const K_PANE_ORDER = "qqq-sim-pane-order";
 const K_PANE_HEIGHTS = "qqq-sim-pane-heights";
+const K_AVWAP_ANCHOR = "qqq-sim-avwap-anchor";
+
+const VPVR_BIN_COUNT = 24;
+const VPVR_MAX_WIDTH_FRAC = 0.25; // widest bin reaches this fraction of the plot width
 
 // clamp range for drag-to-resize, per pane type
 const PRICE_HEIGHT_RANGE = [160, 900];
@@ -140,6 +144,12 @@ export default function Candlestick({ bars, height = 280, series = null, active 
   // without this a stale listener keeps resizing its old pane on every future
   // mouse move, and can even stack with a later legitimate drag
   const activeResizeRef = useRef(null);
+  // anchored-VWAP anchor bar, stored by timestamp (not index — indices shift as new
+  // candles arrive, the timestamp doesn't)
+  const [anchorT, setAnchorT] = useState(() => loadKey(K_AVWAP_ANCHOR, null)?.t ?? null);
+  // discriminates a pane-resize drag from a plain click on the price pane, both of which
+  // start on the same onMouseDown — see beginResize/handlePriceClick
+  const didDragRef = useRef(false);
 
   // don't spam localStorage on every dragover tick — only once the drag settles
   useEffect(() => {
@@ -149,6 +159,12 @@ export default function Candlestick({ bars, height = 280, series = null, active 
 
   // unmount safety net: cancel any drag still in flight
   useEffect(() => () => activeResizeRef.current?.(), []);
+
+  // a stale hover index from a longer previous series (e.g. switching from a symbol
+  // with 60 candles to one with 19) would otherwise index past the end of `bars`
+  useEffect(() => {
+    setHover(null);
+  }, [bars]);
 
   // resync chart width on window resize — the render-time check below only fires
   // when something else causes a re-render, so a resize with no other state change
@@ -168,7 +184,9 @@ export default function Candlestick({ bars, height = 280, series = null, active 
     e.preventDefault();
     activeResizeRef.current?.(); // force-clean any dangling previous drag first
     const startY = e.clientY;
+    didDragRef.current = false;
     function onMove(ev) {
+      if (Math.abs(ev.clientY - startY) > 3) didDragRef.current = true;
       const next = Math.min(max, Math.max(min, Math.round(startHeight + (ev.clientY - startY))));
       setPaneHeights((h) => (h[paneKey] === next ? h : { ...h, [paneKey]: next }));
     }
@@ -197,15 +215,44 @@ export default function Candlestick({ bars, height = 280, series = null, active 
 
   const activeCfgs = series ? INDICATORS.filter((c) => active.includes(c.key)) : [];
   const overlays = activeCfgs.filter((c) => c.pane === "price");
+  const lineOverlays = overlays.filter((c) => !c.type);
   const oscCfgByPane = new Map(activeCfgs.filter((c) => c.pane !== "price").map((c) => [c.pane, c]));
+  const avwapOn = active.includes("avwap");
+  const vpvrOn = active.includes("vpvr");
 
-  const overlayKeys = overlays.map((c) => c.key).join(",");
+  // Anchored VWAP: default to the highest-volume bar in the window until the user clicks
+  // one. If a previously-anchored timestamp has scrolled out of the current window (new
+  // snapshot, symbol switch), fall back the same way rather than pinning to a stale index.
+  const anchorIdx = useMemo(() => {
+    if (!bars.length) return -1;
+    const stored = anchorT ? bars.findIndex((b) => b.t === anchorT) : -1;
+    if (stored !== -1) return stored;
+    let best = 0;
+    for (let i = 1; i < bars.length; i++) if (bars[i].volume > bars[best].volume) best = i;
+    return best;
+  }, [bars, anchorT]);
+
+  const avwapValues = useMemo(() => {
+    if (!avwapOn || anchorIdx < 0) return null;
+    const out = new Array(bars.length).fill(null);
+    let cumPV = 0;
+    let cumVol = 0;
+    for (let i = anchorIdx; i < bars.length; i++) {
+      const typical = (bars[i].high + bars[i].low + bars[i].close) / 3;
+      cumPV += typical * bars[i].volume;
+      cumVol += bars[i].volume;
+      out[i] = cumVol > 0 ? cumPV / cumVol : null;
+    }
+    return out;
+  }, [avwapOn, bars, anchorIdx]);
+
+  const overlayKeys = lineOverlays.map((c) => c.key).join(",");
   const { min, max, candleW, gap } = useMemo(() => {
     if (!bars.length) return { min: 0, max: 1, candleW: 4, gap: 2 };
     let lo = Math.min(...bars.map((b) => b.low));
     let hi = Math.max(...bars.map((b) => b.high));
     // fold in the enabled price-scale overlays, or Bollinger bands clip
-    for (const cfg of overlays) {
+    for (const cfg of lineOverlays) {
       for (const k of cfg.series) {
         const arr = series?.[k];
         if (!arr) continue;
@@ -217,6 +264,13 @@ export default function Candlestick({ bars, height = 280, series = null, active 
         }
       }
     }
+    if (avwapValues) {
+      for (const v of avwapValues) {
+        if (!isNum(v)) continue;
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+    }
     const pad = (hi - lo) * 0.06 || 1;
     const slot = plotW / bars.length;
     return {
@@ -226,9 +280,28 @@ export default function Candlestick({ bars, height = 280, series = null, active 
       gap: slot,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bars, plotW, series, overlayKeys]);
+  }, [bars, plotW, series, overlayKeys, avwapOn, avwapValues]);
 
   const maxVol = useMemo(() => Math.max(...bars.map((b) => b.volume), 1), [bars]);
+
+  // Volume Profile: bins the visible price range (not the raw candle range) so it reads
+  // consistently with whatever overlays already stretched the price axis.
+  const vpvrBins = useMemo(() => {
+    if (!vpvrOn || !bars.length || max - min < 1e-6) return null;
+    const binSize = (max - min) / VPVR_BIN_COUNT;
+    const bins = Array.from({ length: VPVR_BIN_COUNT }, (_, i) => ({ lo: min + i * binSize, hi: min + (i + 1) * binSize, volume: 0 }));
+    for (const b of bars) {
+      const typical = (b.high + b.low + b.close) / 3;
+      let idx = Math.floor((typical - min) / binSize);
+      if (idx < 0) idx = 0;
+      if (idx >= VPVR_BIN_COUNT) idx = VPVR_BIN_COUNT - 1;
+      bins[idx].volume += b.volume;
+    }
+    const maxBinVol = Math.max(...bins.map((b) => b.volume), 1);
+    let pocIdx = 0;
+    for (let i = 1; i < bins.length; i++) if (bins[i].volume > bins[pocIdx].volume) pocIdx = i;
+    return { bins, maxBinVol, pocIdx };
+  }, [vpvrOn, bars, min, max]);
 
   // volume strip stays a fixed-height footer; growing the pane extends the
   // candle area above it, which is what actually makes the chart "longer"
@@ -245,6 +318,18 @@ export default function Candlestick({ bars, height = 280, series = null, active 
     const x = e.clientX - rect.left - PAD_X.left;
     const idx = Math.max(0, Math.min(bars.length - 1, Math.round((x - gap / 2) / gap)));
     setHover({ index: idx, x: xCenter(idx) });
+  }
+
+  // Click a candle while the AVWAP chip is on to re-anchor it there. Fires after mouseup,
+  // so a pane-resize drag (same onMouseDown) is ruled out via didDragRef rather than by
+  // fighting over which handler runs first.
+  function handlePriceClick() {
+    if (!avwapOn || didDragRef.current || !hover) return;
+    const t = bars[hover.index]?.t;
+    if (t) {
+      setAnchorT(t);
+      saveKey(K_AVWAP_ANCHOR, { t });
+    }
   }
 
   function handleDragStart(e, key) {
@@ -277,7 +362,10 @@ export default function Candlestick({ bars, height = 280, series = null, active 
   }
 
   const n = bars.length;
-  const readIdx = hover ? hover.index : n - 1;
+  // clamp defensively: the useEffect above clears stale hover state on a new `bars`
+  // array, but effects run after render, so the render that first receives a shorter
+  // series must not trust an out-of-range hover.index left over from the longer one
+  const readIdx = hover && hover.index < n ? hover.index : n - 1;
   const h = bars[readIdx];
   const hUp = h.close >= h.open;
 
@@ -286,12 +374,21 @@ export default function Candlestick({ bars, height = 280, series = null, active 
 
   const legend = activeCfgs.map((cfg) => {
     const dec = cfg.domain ? 1 : 2;
-    const text = cfg.series
-      .map((k) => {
-        const v = series?.[k]?.[readIdx];
-        return isNum(v) ? v.toFixed(dec) : "—";
-      })
-      .join(" / ");
+    let text;
+    if (cfg.type === "avwap") {
+      const v = avwapValues?.[readIdx];
+      text = isNum(v) ? v.toFixed(2) : "—";
+    } else if (cfg.type === "profile") {
+      const poc = vpvrBins?.bins[vpvrBins.pocIdx];
+      text = poc ? ((poc.lo + poc.hi) / 2).toFixed(2) + " POC" : "—";
+    } else {
+      text = cfg.series
+        .map((k) => {
+          const v = series?.[k]?.[readIdx];
+          return isNum(v) ? v.toFixed(dec) : "—";
+        })
+        .join(" / ");
+    }
     return { key: cfg.key, label: cfg.label, color: cfg.color, text };
   });
 
@@ -335,10 +432,11 @@ export default function Candlestick({ bars, height = 280, series = null, active 
                 <svg
                   width={width}
                   height={priceHeight}
-                  style={{ display: "block", cursor: "ns-resize" }}
+                  style={{ display: "block", cursor: avwapOn ? "crosshair" : "ns-resize" }}
                   onMouseDown={(e) => beginResize(e, "price", priceHeight, PRICE_HEIGHT_RANGE)}
+                  onClick={handlePriceClick}
                 >
-                  <title>Drag vertically to resize</title>
+                  <title>{avwapOn ? "Click a candle to re-anchor AVWAP — drag to resize" : "Drag vertically to resize"}</title>
                   {ticks.map((t, i) => (
                     <g key={i}>
                       <line x1={PAD_X.left} x2={width - PAD_X.right} y1={yPrice(t)} y2={yPrice(t)} stroke={GRID} strokeWidth={1} />
@@ -348,7 +446,28 @@ export default function Candlestick({ bars, height = 280, series = null, active 
                     </g>
                   ))}
 
-                  {overlays.map((cfg) => (
+                  {vpvrBins && (
+                    <g opacity={0.9}>
+                      {vpvrBins.bins.map((bin, i) => {
+                        if (bin.volume <= 0) return null;
+                        const w = (bin.volume / vpvrBins.maxBinVol) * plotW * VPVR_MAX_WIDTH_FRAC;
+                        const isPoc = i === vpvrBins.pocIdx;
+                        return (
+                          <rect
+                            key={i}
+                            x={width - PAD_X.right - w}
+                            y={yPrice(bin.hi)}
+                            width={w}
+                            height={Math.max(yPrice(bin.lo) - yPrice(bin.hi), 1)}
+                            fill={isPoc ? "#E8A33D" : "#4C8DFF"}
+                            opacity={isPoc ? 0.4 : 0.15}
+                          />
+                        );
+                      })}
+                    </g>
+                  )}
+
+                  {lineOverlays.map((cfg) => (
                     <g key={cfg.key}>
                       {cfg.fill && (
                         <path d={buildBandPath(series[cfg.fill[0]], series[cfg.fill[1]], n, xCenter, yPrice)} fill={cfg.color} opacity={0.08} stroke="none" />
@@ -367,6 +486,20 @@ export default function Candlestick({ bars, height = 280, series = null, active 
                       ))}
                     </g>
                   ))}
+
+                  {avwapValues && anchorIdx >= 0 && (
+                    <g>
+                      <path d={buildPath(avwapValues, n, xCenter, yPrice)} fill="none" stroke="#FFB86C" strokeWidth={1.5} strokeDasharray="4,3" strokeLinejoin="round" />
+                      <path
+                        d={(() => {
+                          const cx = xCenter(anchorIdx);
+                          const y = yPrice(bars[anchorIdx].low) + 10;
+                          return `M${cx - 4},${y} L${cx + 4},${y} L${cx},${y - 6} Z`;
+                        })()}
+                        fill="#FFB86C"
+                      />
+                    </g>
+                  )}
 
                   {bars.map((b, i) => {
                     const up = b.close >= b.open;
@@ -445,7 +578,7 @@ export default function Candlestick({ bars, height = 280, series = null, active 
                     key={k}
                     d={buildPath(series[k], n, xCenter, y)}
                     fill="none"
-                    stroke={i === 0 ? cfg.color : cfg.signalColor || cfg.color}
+                    stroke={cfg.seriesColors?.[k] ?? (i === 0 ? cfg.color : cfg.signalColor || cfg.color)}
                     strokeWidth={1.3}
                     strokeLinejoin="round"
                   />

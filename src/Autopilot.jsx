@@ -1,7 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { narrateAutopilot } from "./narrator.js";
+import { useCountdown, RefetchStatus } from "./RefetchStatus.jsx";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:8787";
+const NEWS_POLL_MS = 2 * 60 * 1000;
+const AUTOPILOT_POLL_MS = 10 * 1000;
 const fmt$ = (n) => (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtPct = (n) => (n > 0 ? "+" : "") + n.toFixed(2) + "%";
 
@@ -22,29 +25,57 @@ function scoreColor(score) {
 
 // Presentational: App.jsx owns the /api/indicators fetch so the chart overlays
 // and this table share a single request per poll.
-export function IndicatorsPanel({ data, error }) {
-  if (error) return <div className="card"><div className="section-title">Indicators</div><div className="muted" style={{ fontSize: 12 }}>{error}</div></div>;
-  if (!data || data.insufficientData) return <div className="card"><div className="section-title">Indicators</div><div className="muted">Loading…</div></div>;
+export function IndicatorsPanel({ data, error, secondsLeft, status }) {
+  if (error) {
+    return (
+      <div className="card">
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <div className="section-title" style={{ margin: 0 }}>Indicators</div>
+          <RefetchStatus secondsLeft={secondsLeft} status={status} />
+        </div>
+        <div className="muted" style={{ fontSize: 12 }}>{error}</div>
+      </div>
+    );
+  }
+  if (!data || data.insufficientData) {
+    return (
+      <div className="card">
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <div className="section-title" style={{ margin: 0 }}>Indicators</div>
+          <RefetchStatus secondsLeft={secondsLeft} status={status} />
+        </div>
+        <div className="muted">Loading…</div>
+      </div>
+    );
+  }
 
-  const { latest, composite } = data;
+  const { latest, composite, iv } = data;
   const rows = [
     ["RSI (14)", latest.rsi14?.toFixed(1), Number.isFinite(latest.rsi14) && latest.rsi14 < 30 ? "green" : Number.isFinite(latest.rsi14) && latest.rsi14 > 70 ? "red" : ""],
     ["MACD", latest.macd?.toFixed(2), latest.macd > latest.macdSignal ? "green" : "red"],
     ["MACD signal", latest.macdSignal?.toFixed(2), ""],
     ["SMA 20 / 50", `${latest.sma20?.toFixed(1)} / ${latest.sma50?.toFixed(1)}`, Number.isFinite(latest.sma20) && Number.isFinite(latest.sma50) ? (latest.sma20 > latest.sma50 ? "green" : "red") : ""],
+    ["EMA 9 / 21 / 50", `${latest.ema9?.toFixed(1)} / ${latest.ema21?.toFixed(1)} / ${latest.ema50?.toFixed(1)}`, Number.isFinite(latest.ema9) && Number.isFinite(latest.ema21) ? (latest.ema9 > latest.ema21 ? "green" : "red") : ""],
     ["Bollinger", `${latest.bbLower?.toFixed(1)} – ${latest.bbUpper?.toFixed(1)}`, ""],
     ["VWAP", latest.vwap?.toFixed(2), latest.price > latest.vwap ? "green" : "red"],
     ["ATR (14)", latest.atr14?.toFixed(2), ""],
+    ["ADX (14)", latest.adx14?.toFixed(1), Number.isFinite(latest.adx14) && latest.adx14 >= 25 ? "amber" : ""],
+    ["+DI / -DI", `${latest.plusDI?.toFixed(1)} / ${latest.minusDI?.toFixed(1)}`, Number.isFinite(latest.plusDI) && Number.isFinite(latest.minusDI) ? (latest.plusDI > latest.minusDI ? "green" : "red") : ""],
     ["Stochastic %K", latest.stochK?.toFixed(1), Number.isFinite(latest.stochK) && latest.stochK < 20 ? "green" : Number.isFinite(latest.stochK) && latest.stochK > 80 ? "red" : ""],
+    ["StochRSI %K / %D", `${latest.stochRsiK?.toFixed(1)} / ${latest.stochRsiD?.toFixed(1)}`, Number.isFinite(latest.stochRsiK) && latest.stochRsiK < 20 ? "green" : Number.isFinite(latest.stochRsiK) && latest.stochRsiK > 80 ? "red" : ""],
+    ["IV Rank / %ile", iv == null ? "—" : iv.insufficient ? `insufficient history (${iv.days}d)` : `${iv.ivRank ?? "—"} / ${iv.ivPercentile ?? "—"}`, ""],
   ];
 
   return (
     <div className="card">
       <div className="row" style={{ justifyContent: "space-between" }}>
         <div className="section-title" style={{ margin: 0 }}>Indicators</div>
-        <span className={`mono ${scoreColor(composite.score)}`} style={{ fontWeight: 600, fontSize: 13 }}>
-          {composite.label.replace("_", " ").toUpperCase()} ({composite.score > 0 ? "+" : ""}{composite.score})
-        </span>
+        <div className="row">
+          <RefetchStatus secondsLeft={secondsLeft} status={status} />
+          <span className={`mono ${scoreColor(composite.score)}`} style={{ fontWeight: 600, fontSize: 13 }}>
+            {composite.label.replace("_", " ").toUpperCase()} ({composite.score > 0 ? "+" : ""}{composite.score})
+          </span>
+        </div>
       </div>
       <table style={{ marginTop: 10 }}>
         <tbody>
@@ -60,40 +91,57 @@ export function IndicatorsPanel({ data, error }) {
   );
 }
 
-export function NewsPanel({ pollKey }) {
+export function NewsPanel({ symbol = "QQQ" }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [lastFetchAt, setLastFetchAt] = useState(null);
+  const [lastFetchOk, setLastFetchOk] = useState(null);
   // sequence guard: the poll effect and the manual Refresh button can both have a
   // request in flight at once (each /api/news call can take up to ~8s), so track
   // which call is the latest and drop any response that resolves after it, the
-  // same "cancelled" guard used for App.jsx's data-fetching effects
+  // same "cancelled" guard used for App.jsx's data-fetching effects. It also drops
+  // in-flight responses for a symbol the user has since switched away from.
   const requestIdRef = useRef(0);
 
   const load = useCallback(async (refresh) => {
     const requestId = ++requestIdRef.current;
     setLoading(true);
     try {
-      const result = await api(`/api/news${refresh ? "?refresh=1" : ""}`);
+      const result = await api(`/api/news?symbol=${symbol}${refresh ? "&refresh=1" : ""}`);
       if (requestIdRef.current !== requestId) return;
       setData(result);
       setError(null);
+      setLastFetchOk(true);
     } catch (e) {
-      if (requestIdRef.current === requestId) setError(e.message);
+      if (requestIdRef.current === requestId) {
+        setError(e.message);
+        setLastFetchOk(false);
+      }
     } finally {
-      if (requestIdRef.current === requestId) setLoading(false);
+      if (requestIdRef.current === requestId) {
+        setLoading(false);
+        setLastFetchAt(Date.now());
+      }
     }
-  }, []);
+  }, [symbol]);
 
   useEffect(() => {
+    setData(null); // load's identity changes with the symbol — never show the old symbol's headlines
     load(false);
-  }, [load, pollKey]);
+    const t = setInterval(() => load(false), NEWS_POLL_MS);
+    return () => clearInterval(t);
+  }, [load]);
+
+  const secondsLeft = useCountdown(NEWS_POLL_MS, lastFetchAt);
+  const status = lastFetchOk == null ? null : lastFetchOk ? "success" : "error";
 
   return (
     <div className="card">
       <div className="row" style={{ justifyContent: "space-between" }}>
-        <div className="section-title" style={{ margin: 0 }}>QQQ-relevant news</div>
+        <div className="section-title" style={{ margin: 0 }}>{symbol}-relevant news</div>
         <div className="row">
+          <RefetchStatus secondsLeft={secondsLeft} status={status} />
           {data?.analysisMode === "gemini" && (
             <span className="mono" style={{ color: "#4C8DFF", fontSize: 10, fontWeight: 600 }}>GEMINI</span>
           )}
@@ -135,7 +183,7 @@ export function NewsPanel({ pollKey }) {
         ))}
         {data?.items?.length > 0 && !data?.relevantItems?.length && (
           <div className="muted" style={{ fontSize: 12 }}>
-            No QQQ-relevant headlines right now (relevance ≥ 25) — {data.items.length} headlines scanned.
+            No {symbol}-relevant headlines right now (relevance ≥ 25) — {data.items.length} headlines scanned.
           </div>
         )}
         {!data?.items?.length && !error && <div className="muted">Loading news…</div>}
@@ -204,16 +252,19 @@ export function DivergencePanel({ signal, error }) {
 
 // Presentational: App.jsx owns the /api/greeks + /api/signal fetches so this panel
 // and the chain-table pick highlighting share one request per poll.
-export function GreeksPanel({ greeks, signal, error }) {
+export function GreeksPanel({ greeks, signal, error, secondsLeft, status }) {
   const shell = (body) => (
     <div className="card">
       <div className="row" style={{ justifyContent: "space-between" }}>
         <div className="section-title" style={{ margin: 0 }}>Options analysis</div>
-        {signal && Number.isFinite(signal.optionsScore) && (
-          <span className={`mono ${signal.optionsScore <= -40 ? "red" : signal.optionsScore < 0 ? "amber" : "green"}`} style={{ fontSize: 12, fontWeight: 600 }}>
-            {signal.optionsScore === 0 ? "CONDITIONS CLEAR" : `CONDITIONS ${signal.optionsScore.toFixed(1)}`}
-          </span>
-        )}
+        <div className="row">
+          <RefetchStatus secondsLeft={secondsLeft} status={status} />
+          {signal && Number.isFinite(signal.optionsScore) && (
+            <span className={`mono ${signal.optionsScore <= -40 ? "red" : signal.optionsScore < 0 ? "amber" : "green"}`} style={{ fontSize: 12, fontWeight: 600 }}>
+              {signal.optionsScore === 0 ? "CONDITIONS CLEAR" : `CONDITIONS ${signal.optionsScore.toFixed(1)}`}
+            </span>
+          )}
+        </div>
       </div>
       {body}
     </div>
@@ -292,31 +343,46 @@ export function GreeksPanel({ greeks, signal, error }) {
   );
 }
 
-export function AutopilotPanel() {
+export function AutopilotPanel({ symbol = "QQQ" }) {
   const [status, setStatus] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [lastFetchAt, setLastFetchAt] = useState(null);
+  const [lastFetchOk, setLastFetchOk] = useState(null);
   const pollRef = useRef(null);
+  const symbolRef = useRef(symbol); // always-current symbol so in-flight responses for a switched-away symbol get dropped
+  symbolRef.current = symbol;
 
   const refresh = useCallback(async () => {
     try {
-      setStatus(await api("/api/autopilot"));
+      const result = await api(`/api/autopilot?symbol=${symbol}`);
+      if (symbolRef.current !== symbol) return;
+      setStatus(result);
       setError(null);
+      setLastFetchOk(true);
     } catch (e) {
+      if (symbolRef.current !== symbol) return;
       setError(e.message);
+      setLastFetchOk(false);
+    } finally {
+      if (symbolRef.current === symbol) setLastFetchAt(Date.now());
     }
-  }, []);
+  }, [symbol]);
 
   useEffect(() => {
+    setStatus(null); // refresh's identity changes with the symbol — never show the old symbol's portfolio
     refresh();
-    pollRef.current = setInterval(refresh, 15000);
+    pollRef.current = setInterval(refresh, AUTOPILOT_POLL_MS);
     return () => clearInterval(pollRef.current);
   }, [refresh]);
+
+  const secondsLeft = useCountdown(AUTOPILOT_POLL_MS, lastFetchAt);
+  const fetchStatus = lastFetchOk == null ? null : lastFetchOk ? "success" : "error";
 
   async function toggle() {
     setBusy(true);
     try {
-      await api(status?.enabled ? "/api/autopilot/disable" : "/api/autopilot/enable", { method: "POST" });
+      await api(`${status?.enabled ? "/api/autopilot/disable" : "/api/autopilot/enable"}?symbol=${symbol}`, { method: "POST" });
       await refresh();
     } catch (e) {
       setError(e.message);
@@ -328,7 +394,7 @@ export function AutopilotPanel() {
   async function runNow() {
     setBusy(true);
     try {
-      await api("/api/autopilot/run-now", { method: "POST" });
+      await api(`/api/autopilot/run-now?symbol=${symbol}`, { method: "POST" });
       await refresh();
     } catch (e) {
       setError(e.message);
@@ -338,10 +404,10 @@ export function AutopilotPanel() {
   }
 
   async function reset() {
-    if (!window.confirm("Reset autopilot portfolio to $10,000 and clear all history?")) return;
+    if (!window.confirm(`Reset the ${symbol} autopilot portfolio to $10,000 and clear all history?`)) return;
     setBusy(true);
     try {
-      await api("/api/autopilot/reset", { method: "POST" });
+      await api(`/api/autopilot/reset?symbol=${symbol}`, { method: "POST" });
       await refresh();
     } catch (e) {
       setError(e.message);
@@ -363,6 +429,7 @@ export function AutopilotPanel() {
           <div className="section-title" style={{ margin: 0 }}>Autopilot &middot; goal 10%/week</div>
         </div>
         <div className="row">
+          <RefetchStatus secondsLeft={secondsLeft} status={fetchStatus} />
           <button className="ghost" onClick={runNow} disabled={busy}>Run now</button>
           <button className={status.enabled ? "sell" : "buy"} onClick={toggle} disabled={busy}>
             {status.enabled ? "Stop" : "Start"}
@@ -412,7 +479,7 @@ export function AutopilotPanel() {
               const pnl = (mark - p.entryPrice) * 100 * p.qty;
               return (
                 <tr key={p.id}>
-                  <td className="mono">QQQ {p.strike}{p.type === "call" ? "C" : "P"} {p.expiration}</td>
+                  <td className="mono">{p.symbol ?? symbol} {p.strike}{p.type === "call" ? "C" : "P"} {p.expiration}</td>
                   <td className="mono">{p.qty}</td>
                   <td className="mono">{p.entryPrice.toFixed(2)}</td>
                   <td className="mono">{mark.toFixed(2)}</td>
@@ -447,7 +514,7 @@ export function AutopilotPanel() {
           <div className="trade-log">
             {status.trades.slice(0, 30).map((t, i) => (
               <div key={i} className="mono" style={{ fontSize: 12, padding: "4px 0", borderBottom: "1px solid #1A1D21" }}>
-                <span className={t.action === "BUY" ? "green" : "red"}>{t.action}</span> {t.qty}x QQQ {t.strike}{t.type === "call" ? "C" : "P"} {t.expiration} @ {(t.action === "BUY" ? t.entryPrice : t.closePrice).toFixed(2)}
+                <span className={t.action === "BUY" ? "green" : "red"}>{t.action}</span> {t.qty}x {t.symbol ?? symbol} {t.strike}{t.type === "call" ? "C" : "P"} {t.expiration} @ {(t.action === "BUY" ? t.entryPrice : t.closePrice).toFixed(2)}
                 <span className="muted"> &middot; {new Date(t.at).toLocaleTimeString()}</span>
                 {t.reason && <div className="muted" style={{ fontSize: 11 }}>{t.reason}</div>}
               </div>

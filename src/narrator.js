@@ -15,19 +15,19 @@ function expLabel(exp) {
 
 const lean = (score) => (score > 12 ? "bullish" : score < -12 ? "bearish" : "neutral");
 
-export function narrateMarket(quote) {
+export function narrateMarket(quote, symbol = "QQQ") {
   if (!quote || quote.price == null) return null;
   if (quote.changePct == null || Math.abs(quote.changePct) < 0.05) {
-    return `QQQ is trading at ${fmt$(quote.price)}, roughly flat versus the prior close.`;
+    return `${symbol} is trading at ${fmt$(quote.price)}, roughly flat versus the prior close.`;
   }
   const dir = quote.changePct > 0 ? "up" : "down";
-  return `QQQ is trading at ${fmt$(quote.price)}, ${dir} ${Math.abs(quote.changePct).toFixed(2)}% (${fmt$(Math.abs(quote.change))}) from the prior close.`;
+  return `${symbol} is trading at ${fmt$(quote.price)}, ${dir} ${Math.abs(quote.changePct).toFixed(2)}% (${fmt$(Math.abs(quote.change))}) from the prior close.`;
 }
 
 // quality = greeks.summary[expiration]; penalties = signal.optionsFactors.penalties.
 // Severity wording keys off the server's actual penalties, so it can never
 // disagree with the score the strategy computed.
-export function narrateOptions(quality, expiration, penalties) {
+export function narrateOptions(quality, expiration, penalties, symbol = "QQQ") {
   if (!quality) {
     return {
       tone: "muted",
@@ -43,7 +43,7 @@ export function narrateOptions(quality, expiration, penalties) {
 
   if (quality.atmIv != null) {
     const ivWord = pen.iv >= 10 ? "look expensive" : pen.iv > 0 ? "look a bit pricey" : "look reasonably priced";
-    let s = `${expText} ${ivWord} — the market is pricing in about a ${(quality.atmIv * 100).toFixed(1)}% annual swing for QQQ (that's "implied volatility"; the higher it is, the more you pay for the same bet).`;
+    let s = `${expText} ${ivWord} — the market is pricing in about a ${(quality.atmIv * 100).toFixed(1)}% annual swing for ${symbol} (that's "implied volatility"; the higher it is, the more you pay for the same bet).`;
     if (pen.iv > 0) s += ` That expensiveness cost the buy/sell signal ${pen.iv} points.`;
     sentences.push(s);
   }
@@ -55,7 +55,7 @@ export function narrateOptions(quality, expiration, penalties) {
   }
   if (quality.dailyThetaPctAtm != null) {
     sentences.push(
-      `Holding an at-the-money option here loses about ${(quality.dailyThetaPctAtm * 100).toFixed(1)}% of its value per day purely from time passing (time decay) — even if QQQ doesn't move.`
+      `Holding an at-the-money option here loses about ${(quality.dailyThetaPctAtm * 100).toFixed(1)}% of its value per day purely from time passing (time decay) — even if ${symbol} doesn't move.`
     );
   }
   if (quality.liquidityOk === false) {
@@ -82,7 +82,7 @@ function pickModeNote(mode) {
   return "";
 }
 
-export function narrateDecision(signal, preview) {
+export function narrateDecision(signal, preview, symbol = "QQQ") {
   if (!signal || !Number.isFinite(signal.combinedScore)) return [];
   const sentences = [];
   const base = signal.techScore * 0.75 + signal.newsScore * 0.25;
@@ -98,8 +98,8 @@ export function narrateDecision(signal, preview) {
   } else {
     sentences.push(`Option conditions look clear, so the score stands at ${signed(signal.combinedScore)}.`);
   }
-  if (signal.action === "buy_call") sentences.push("Verdict: BUY CALL — a bet that QQQ rises.");
-  else if (signal.action === "buy_put") sentences.push("Verdict: BUY PUT — a bet that QQQ falls.");
+  if (signal.action === "buy_call") sentences.push(`Verdict: BUY CALL — a bet that ${symbol} rises.`);
+  else if (signal.action === "buy_put") sentences.push(`Verdict: BUY PUT — a bet that ${symbol} falls.`);
   else sentences.push("Verdict: HOLD — the signal isn't strong enough to justify paying for an option right now.");
 
   const side = signal.action === "buy_put" ? "put" : "call";

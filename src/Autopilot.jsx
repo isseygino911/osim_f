@@ -25,7 +25,7 @@ function scoreColor(score) {
 
 // Presentational: App.jsx owns the /api/indicators fetch so the chart overlays
 // and this table share a single request per poll.
-export function IndicatorsPanel({ data, error, secondsLeft, status }) {
+export function IndicatorsPanel({ data, error, secondsLeft, status, active = null }) {
   if (error) {
     return (
       <div className="card">
@@ -50,21 +50,25 @@ export function IndicatorsPanel({ data, error, secondsLeft, status }) {
   }
 
   const { latest, composite, iv } = data;
-  const rows = [
-    ["RSI (14)", latest.rsi14?.toFixed(1), Number.isFinite(latest.rsi14) && latest.rsi14 < 30 ? "green" : Number.isFinite(latest.rsi14) && latest.rsi14 > 70 ? "red" : ""],
-    ["MACD", latest.macd?.toFixed(2), latest.macd > latest.macdSignal ? "green" : "red"],
-    ["MACD signal", latest.macdSignal?.toFixed(2), ""],
-    ["SMA 20 / 50", `${latest.sma20?.toFixed(1)} / ${latest.sma50?.toFixed(1)}`, Number.isFinite(latest.sma20) && Number.isFinite(latest.sma50) ? (latest.sma20 > latest.sma50 ? "green" : "red") : ""],
-    ["EMA 9 / 21 / 50", `${latest.ema9?.toFixed(1)} / ${latest.ema21?.toFixed(1)} / ${latest.ema50?.toFixed(1)}`, Number.isFinite(latest.ema9) && Number.isFinite(latest.ema21) ? (latest.ema9 > latest.ema21 ? "green" : "red") : ""],
-    ["Bollinger", `${latest.bbLower?.toFixed(1)} – ${latest.bbUpper?.toFixed(1)}`, ""],
-    ["VWAP", latest.vwap?.toFixed(2), latest.price > latest.vwap ? "green" : "red"],
-    ["ATR (14)", latest.atr14?.toFixed(2), ""],
-    ["ADX (14)", latest.adx14?.toFixed(1), Number.isFinite(latest.adx14) && latest.adx14 >= 25 ? "amber" : ""],
-    ["+DI / -DI", `${latest.plusDI?.toFixed(1)} / ${latest.minusDI?.toFixed(1)}`, Number.isFinite(latest.plusDI) && Number.isFinite(latest.minusDI) ? (latest.plusDI > latest.minusDI ? "green" : "red") : ""],
-    ["Stochastic %K", latest.stochK?.toFixed(1), Number.isFinite(latest.stochK) && latest.stochK < 20 ? "green" : Number.isFinite(latest.stochK) && latest.stochK > 80 ? "red" : ""],
-    ["StochRSI %K / %D", `${latest.stochRsiK?.toFixed(1)} / ${latest.stochRsiD?.toFixed(1)}`, Number.isFinite(latest.stochRsiK) && latest.stochRsiK < 20 ? "green" : Number.isFinite(latest.stochRsiK) && latest.stochRsiK > 80 ? "red" : ""],
-    ["IV Rank / %ile", iv == null ? "—" : iv.insufficient ? `insufficient history (${iv.days}d)` : `${iv.ivRank ?? "—"} / ${iv.ivPercentile ?? "—"}`, ""],
+  const allRows = [
+    ["rsi", "RSI (14)", latest.rsi14?.toFixed(1), Number.isFinite(latest.rsi14) && latest.rsi14 < 30 ? "green" : Number.isFinite(latest.rsi14) && latest.rsi14 > 70 ? "red" : ""],
+    ["macd", "MACD", latest.macd?.toFixed(2), latest.macd > latest.macdSignal ? "green" : "red"],
+    ["macd", "MACD signal", latest.macdSignal?.toFixed(2), ""],
+    ["sma20", "SMA 20 / 50", `${latest.sma20?.toFixed(1)} / ${latest.sma50?.toFixed(1)}`, Number.isFinite(latest.sma20) && Number.isFinite(latest.sma50) ? (latest.sma20 > latest.sma50 ? "green" : "red") : ""],
+    ["ema9", "EMA 9 / 21 / 50", `${latest.ema9?.toFixed(1)} / ${latest.ema21?.toFixed(1)} / ${latest.ema50?.toFixed(1)}`, Number.isFinite(latest.ema9) && Number.isFinite(latest.ema21) ? (latest.ema9 > latest.ema21 ? "green" : "red") : ""],
+    ["bb", "Bollinger", `${latest.bbLower?.toFixed(1)} – ${latest.bbUpper?.toFixed(1)}`, ""],
+    ["vwap", "VWAP", latest.vwap?.toFixed(2), latest.price > latest.vwap ? "green" : "red"],
+    ["atr", "ATR (14)", latest.atr14?.toFixed(2), ""],
+    ["adx", "ADX (14)", latest.adx14?.toFixed(1), Number.isFinite(latest.adx14) && latest.adx14 >= 25 ? "amber" : ""],
+    ["adx", "+DI / -DI", `${latest.plusDI?.toFixed(1)} / ${latest.minusDI?.toFixed(1)}`, Number.isFinite(latest.plusDI) && Number.isFinite(latest.minusDI) ? (latest.plusDI > latest.minusDI ? "green" : "red") : ""],
+    ["stoch", "Stochastic %K", latest.stochK?.toFixed(1), Number.isFinite(latest.stochK) && latest.stochK < 20 ? "green" : Number.isFinite(latest.stochK) && latest.stochK > 80 ? "red" : ""],
+    ["stochrsi", "StochRSI %K / %D", `${latest.stochRsiK?.toFixed(1)} / ${latest.stochRsiD?.toFixed(1)}`, Number.isFinite(latest.stochRsiK) && latest.stochRsiK < 20 ? "green" : Number.isFinite(latest.stochRsiK) && latest.stochRsiK > 80 ? "red" : ""],
+    [null, "IV Rank / %ile", iv == null ? "—" : iv.insufficient ? `insufficient history (${iv.days}d)` : `${iv.ivRank ?? "—"} / ${iv.ivPercentile ?? "—"}`, ""],
   ];
+  // null key (IV Rank) is always shown — it's not a chart-overlay indicator, just informational
+  const rows = (active == null ? allRows : allRows.filter(([key]) => key == null || active.includes(key))).map(
+    ([, label, val, cls]) => [label, val, cls]
+  );
 
   return (
     <div className="card">

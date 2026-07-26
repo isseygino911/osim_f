@@ -131,7 +131,7 @@ function paneDomain(cfg, series, n) {
 // bars: [{ t: ISO string, open, high, low, close, volume }], oldest first
 // series: the `series` object from GET /api/indicators (optional)
 // active: array of indicator keys from indicatorConfig to draw (optional)
-export default function Candlestick({ bars, height = 280, series = null, active = [] }) {
+export default function Candlestick({ bars, height = 280, series = null, active = [], interval = "1d" }) {
   const outerRef = useRef(null);
   const [hover, setHover] = useState(null); // { index, x }
   const [width, setWidth] = useState(600);
@@ -403,7 +403,12 @@ export default function Candlestick({ bars, height = 280, series = null, active 
           L <span className={hUp ? "green" : "red"}>{h.low.toFixed(2)}</span>{"  "}
           C <span className={hUp ? "green" : "red"}>{h.close.toFixed(2)}</span>
         </span>
-        <span className="muted mono">{new Date(h.t).toLocaleDateString(undefined, { month: "short", day: "numeric" })} &middot; vol {h.volume.toLocaleString()}</span>
+        <span className="muted mono">
+          {interval === "1d"
+            ? new Date(h.t).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+            : new Date(h.t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+          {" "}&middot; vol {h.volume.toLocaleString()}
+        </span>
       </div>
 
       {legend.length > 0 && (

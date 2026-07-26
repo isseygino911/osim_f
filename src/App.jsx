@@ -7,18 +7,29 @@ import { loadKey, saveKey } from "./storage.js";
 import { IndicatorsPanel, NewsPanel, AutopilotPanel, GreeksPanel, DivergencePanel } from "./Autopilot.jsx";
 import SummaryPanel from "./SummaryPanel.jsx";
 import { useCountdown, RefetchStatus } from "./RefetchStatus.jsx";
-import { useRefreshStatusPoll, RefreshProgressBanner } from "./RefreshProgress.jsx";
+import { useRefreshStatusPoll, ActiveRefreshesList, RefreshProgressBanner } from "./RefreshProgress.jsx";
 
 const CASH_START = 10000;
 const POLL_DEFAULT = 5; // seconds
+const AUTO_REFETCH_MS = 5 * 60 * 1000; // how often to pull fresh Robinhood data for the active symbol
 const K_INDICATORS = "qqq-sim-indicators"; // chart-layout pref, deliberately global (not per-symbol)
 const K_RECENT = "sim-recent-symbols";
 const LEGACY_K_PORTFOLIO = "qqq-sim-portfolio"; // pre-multi-symbol key, migrated (copied) to sim-QQQ-portfolio
 const RECENT_CAP = 8;
 const SYMBOL_RE = /^[A-Z]{1,6}(\.[A-Z]{1,2})?$/; // mirrors the server's stocks/ETFs-only rule
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:8787";
+const CANDLE_INTERVALS = ["15m", "30m", "1h", "1d"];
+const CANDLE_INTERVAL_DEFAULT = "1d";
 
 const portfolioKey = (symbol) => `sim-${symbol}-portfolio`;
+
+// Snapshots may still hold a legacy flat candles array (pre-multi-interval) — treat
+// that as "1d" data, mirroring the server's candlesFor in indicators.service.js.
+function candlesFor(snapshot, interval) {
+  const c = snapshot?.candles;
+  if (Array.isArray(c)) return interval === "1d" ? c : [];
+  return c?.[interval] || [];
+}
 
 const fmt$ = (n) => (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtPct = (n) => (n > 0 ? "+" : "") + n.toFixed(2) + "%";
@@ -50,12 +61,13 @@ export default function App() {
   const [symbol, setSymbol] = useState(null); // resolved from GET /api/symbol on mount
   const [searchInput, setSearchInput] = useState("");
   const [searchError, setSearchError] = useState(null);
-  const [recentSymbols, setRecentSymbols] = useState(() => loadKey(K_RECENT, ["QQQ"]));
+  const [recentSymbols, setRecentSymbols] = useState(() => loadKey(K_RECENT, []));
   const [noData, setNoData] = useState(false); // snapshot 404 — awaiting a Claude refresh for this symbol
   const [cash, setCash] = useState(CASH_START);
   const [positions, setPositions] = useState([]); // {id, type: 'call'|'put', strike, expiration, qty, entryPrice}
   const [trades, setTrades] = useState([]);
   const [candles, setCandles] = useState([]); // {t, open, high, low, close, volume}
+  const [candleInterval, setCandleInterval] = useState(CANDLE_INTERVAL_DEFAULT);
   const [quote, setQuote] = useState(null); // {price, change, changePct, asOf}
   const [expirations, setExpirations] = useState([]);
   const [selectedExp, setSelectedExp] = useState(null);
@@ -79,20 +91,25 @@ export default function App() {
   const [lastFetchOk, setLastFetchOk] = useState(null); // true | false | null (no fetch completed yet)
   const pollRef = useRef(null);
   const chainsRef = useRef({}); // { [expiration]: {strikes:[...]} } from the last snapshot pull
+  const lastSnapshotRef = useRef(null); // raw snapshot from the last successful pull, for re-slicing candles on interval change
   const selectedExpRef = useRef(selectedExp); // always-current mirror of selectedExp for async closures below
+  const candleIntervalRef = useRef(candleInterval); // always-current mirror of candleInterval for pullSnapshot's async closure
   const symbolRef = useRef(symbol); // always-current symbol so in-flight pulls for a switched-away symbol get dropped
   symbolRef.current = symbol;
   const { status: refreshStatus, setStatus: setRefreshStatus, clear: clearRefreshStatus } = useRefreshStatusPoll(symbol, SERVER_URL);
 
-  // resolve the server-side active symbol once on mount
+  // resolve the server-side active symbol once on mount — stays null (no symbol
+  // selected yet) until the server has one or the user searches and hits "Go"
   useEffect(() => {
     (async () => {
       try {
         const res = await fetch(`${SERVER_URL}/api/symbol`);
         const data = await res.json().catch(() => ({}));
-        setSymbol(typeof data.activeSymbol === "string" && SYMBOL_RE.test(data.activeSymbol) ? data.activeSymbol : "QQQ");
+        if (typeof data.activeSymbol === "string" && SYMBOL_RE.test(data.activeSymbol)) {
+          setSymbol(data.activeSymbol);
+        }
       } catch {
-        setSymbol("QQQ");
+        // no active symbol resolved — leave `symbol` null, the empty state prompts a search
       }
     })();
   }, []);
@@ -134,7 +151,7 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`${SERVER_URL}/api/indicators?symbol=${symbol}`);
+        const res = await fetch(`${SERVER_URL}/api/indicators?symbol=${symbol}&interval=${candleInterval}`);
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || `Server returned ${res.status}`);
         if (cancelled) return;
@@ -147,7 +164,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [pollCount, symbol]);
+  }, [pollCount, symbol, candleInterval]);
 
   // Options analysis refreshes on the same poll cadence as the snapshot. The chain
   // table reuses this data to highlight the strikes the autopilot would pick.
@@ -186,6 +203,13 @@ export default function App() {
     selectedExpRef.current = selectedExp;
   }, [selectedExp]);
 
+  // re-slice candles from the last snapshot pull when the user switches interval —
+  // no need to refetch the whole snapshot, it already carries every interval
+  useEffect(() => {
+    candleIntervalRef.current = candleInterval;
+    if (lastSnapshotRef.current) setCandles(candlesFor(lastSnapshotRef.current, candleInterval));
+  }, [candleInterval]);
+
   const pullSnapshot = useCallback(async () => {
     if (!symbol) return;
     setChainLoading(true);
@@ -205,8 +229,9 @@ export default function App() {
       setQuote({ price, change, changePct, asOf: snap.fetchedAt || new Date().toISOString() });
       setError(null);
 
-      if (Array.isArray(snap.candles) && snap.candles.length) {
-        setCandles(snap.candles);
+      if (snap.candles) {
+        lastSnapshotRef.current = snap;
+        setCandles(candlesFor(snap, candleIntervalRef.current));
       }
 
       const exps = snap.expirations || [];
@@ -289,6 +314,7 @@ export default function App() {
     if (!symbol) return;
     setQuote(null);
     setCandles([]);
+    lastSnapshotRef.current = null;
     setExpirations([]);
     setSelectedExp(null);
     setChain(null);
@@ -366,6 +392,47 @@ export default function App() {
     }
   }, [setRefreshStatus]);
 
+  // "Cancel" in the refresh banner — only works while still queued (server 409s once
+  // the watcher has claimed it and it's "running"), since there's no way to stop a
+  // headless process already in flight.
+  const cancelRefreshRequest = useCallback(async () => {
+    if (!symbol) return;
+    try {
+      const res = await fetch(`${SERVER_URL}/api/refresh?symbol=${symbol}`, { method: "DELETE" });
+      if (res.ok) clearRefreshStatus();
+    } catch {
+      // best-effort — leave the banner as-is if the request itself failed
+    }
+  }, [symbol, clearRefreshStatus]);
+
+  // "Reset snapshot" — deletes the symbol's fetched Robinhood data server-side (so
+  // the next refresh starts clean instead of layering onto stale strikes/candles)
+  // and clears everything derived from it locally, same fields the symbol-switch
+  // effect above resets. Confirms first since this discards real fetched data.
+  const resetSnapshot = useCallback(async () => {
+    if (!symbol) return;
+    if (!window.confirm(`Delete the fetched snapshot for ${symbol}? You'll need to fetch it again to see data.`)) return;
+    try {
+      await fetch(`${SERVER_URL}/api/snapshot?symbol=${symbol}`, { method: "DELETE" });
+    } catch {
+      // best-effort — clear local state regardless so the UI doesn't show stale data
+    }
+    setQuote(null);
+    setCandles([]);
+    lastSnapshotRef.current = null;
+    setExpirations([]);
+    setSelectedExp(null);
+    setChain(null);
+    chainsRef.current = {};
+    setIndicators(null);
+    setGreeksData(null);
+    setSignalData(null);
+    setError(null);
+    setNoData(true);
+    setLastFetchOk(null);
+    clearRefreshStatus();
+  }, [symbol, clearRefreshStatus]);
+
   // once a refresh finishes, pull the fresh snapshot immediately instead of waiting
   // for the next 5s poll tick
   useEffect(() => {
@@ -374,6 +441,16 @@ export default function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshStatus?.status, refreshStatus?.updatedAt]);
+
+  // keep the active symbol's real Robinhood data from going stale — separate from
+  // the 5s/30s/etc "Poll every" cadence above, which only re-reads the last snapshot
+  // already on disk. requestRefresh's 15s server-side cooldown makes this safe even
+  // if the user also clicks "Fetch snapshot" manually around the same time.
+  useEffect(() => {
+    if (!symbol) return;
+    const id = setInterval(() => triggerRefresh(symbol), AUTO_REFETCH_MS);
+    return () => clearInterval(id);
+  }, [symbol, triggerRefresh]);
 
   function confirmBuy() {
     if (!buyTarget || buyQty < 1) return;
@@ -483,10 +560,14 @@ export default function App() {
         @keyframes spin { to { transform: rotate(360deg); } }
         .progress-track { height:6px; border-radius:99px; background:#1B1F24; overflow:hidden; }
         .progress-fill { height:100%; background:#4C8DFF; transition: width .3s ease; }
+        .refresh-log { max-height:140px; overflow-y:auto; background:#0F1114; border:1px solid #1E2227; border-radius:6px; padding:8px 10px; font-size:11px; line-height:1.7; }
+        .refresh-log-line { white-space:pre-wrap; word-break:break-word; }
         .summary p { margin:4px 0 0; font-size:13px; line-height:1.6; color:#C9CDD1; }
         .summary .sub { font-weight:600; color:#E7E9EA; font-size:13px; margin-top:12px; }
         .trade-log { max-height:220px; overflow-y:auto; }
       `}</style>
+
+      <ActiveRefreshesList serverUrl={SERVER_URL} />
 
       <div className="header">
         <div>
@@ -562,7 +643,24 @@ export default function App() {
         </div>
       </div>
 
-      {refreshStatus && <RefreshProgressBanner status={refreshStatus} onDismiss={clearRefreshStatus} />}
+      {!symbol && (
+        <div className="card" style={{ marginBottom: 16, textAlign: "center", padding: 40 }}>
+          <div className="section-title" style={{ marginBottom: 6 }}>No symbol selected</div>
+          <div className="muted" style={{ fontSize: 13 }}>
+            Search for a stock or ETF above and click &ldquo;Go&rdquo; to fetch live data via Robinhood and start paper trading.
+          </div>
+          <div className="row" style={{ justifyContent: "center", marginTop: 16 }}>
+            <IndicatorToggles active={activeInd} onToggle={toggleIndicator} onHelp={setHelpKey} disabled={false} />
+          </div>
+          <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+            Pick which indicators to track now — only the ones checked here get fetched once you select a symbol.
+          </div>
+        </div>
+      )}
+
+      {symbol && (
+        <>
+      {refreshStatus && <RefreshProgressBanner status={refreshStatus} onDismiss={clearRefreshStatus} onCancel={cancelRefreshRequest} />}
 
       {error && <div className="err">{error}</div>}
 
@@ -579,9 +677,13 @@ export default function App() {
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="row" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
           <div className="section-title" style={{ margin: 0 }}>Price</div>
-          <IndicatorToggles active={activeInd} onToggle={toggleIndicator} onHelp={setHelpKey} disabled={!indicators?.series} iv={indicators?.iv} />
+          <IndicatorToggles active={activeInd} onToggle={toggleIndicator} onHelp={setHelpKey} disabled={false} iv={indicators?.iv} />
           <div className="row">
             <RefetchStatus secondsLeft={polling ? secondsLeft : null} status={fetchStatus} />
+            <label className="muted" style={{ fontSize: 12 }}>Interval</label>
+            <select value={candleInterval} onChange={(e) => setCandleInterval(e.target.value)}>
+              {CANDLE_INTERVALS.map((iv) => <option key={iv} value={iv}>{iv}</option>)}
+            </select>
             <label className="muted" style={{ fontSize: 12 }}>Poll every</label>
             <select value={intervalSec} onChange={(e) => setIntervalSec(Number(e.target.value))}>
               <option value={5}>5s</option>
@@ -591,14 +693,26 @@ export default function App() {
             </select>
             <button className="ghost" onClick={() => setPolling((p) => !p)}>{polling ? "Pause" : "Resume"}</button>
             <button className="ghost" onClick={pullSnapshot}>Refresh now</button>
+            <button className="ghost" title="Fetch fresh data from Robinhood for this symbol" onClick={() => symbol && triggerRefresh(symbol)} disabled={!symbol}>
+              Fetch snapshot
+            </button>
+            <button className="ghost" title="Delete this symbol's fetched data and start over" onClick={resetSnapshot} disabled={!symbol}>
+              Reset snapshot
+            </button>
           </div>
         </div>
         <div style={{ marginTop: 10 }}>
-          <Candlestick bars={candles} height={280} series={indicators?.series} active={activeInd} />
+          {candles.length ? (
+            <Candlestick bars={candles} height={280} series={indicators?.series} active={activeInd} interval={candleInterval} />
+          ) : (
+            <div className="muted" style={{ padding: 20, textAlign: "center" }}>
+              No {candleInterval} candles yet for {symbol ?? "this symbol"} — ask Claude to refresh it.
+            </div>
+          )}
         </div>
       </div>
 
-      <SummaryPanel quote={quote} greeks={greeksData} signal={signalData} symbol={symbol ?? "QQQ"} />
+      <SummaryPanel quote={quote} greeks={greeksData} signal={signalData} symbol={symbol} />
 
       <div className="section-title" style={{ margin: 20 }}>Option chain</div>
       <div className="grid">
@@ -718,12 +832,12 @@ export default function App() {
 
       <div className="grid" style={{ marginTop: 16 }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          <AutopilotPanel symbol={symbol ?? "QQQ"} />
+          <AutopilotPanel symbol={symbol} />
           <GreeksPanel greeks={greeksData} signal={signalData} error={greeksError} secondsLeft={polling ? secondsLeft : null} status={greeksStatus} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          <IndicatorsPanel data={indicators} error={indError} secondsLeft={polling ? secondsLeft : null} status={indStatus} />
-          <NewsPanel symbol={symbol ?? "QQQ"} />
+          <IndicatorsPanel data={indicators} error={indError} secondsLeft={polling ? secondsLeft : null} status={indStatus} active={activeInd} />
+          <NewsPanel symbol={symbol} />
           <DivergencePanel signal={signalData} error={greeksError} />
         </div>
       </div>
@@ -731,6 +845,8 @@ export default function App() {
       <div className="row" style={{ marginTop: 16, justifyContent: "flex-end" }}>
         <button className="ghost" onClick={resetSim}>Reset simulator (manual paper account)</button>
       </div>
+        </>
+      )}
 
       {buyTarget && (
         <div className="modal-bg" onClick={() => setBuyTarget(null)}>

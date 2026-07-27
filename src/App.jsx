@@ -712,6 +712,7 @@ export default function App() {
         .green { color:var(--green); }
         .red { color:var(--red); }
         .amber { color:var(--amber); }
+        .hl { font-weight:700; }
         .card { background:var(--bg-card); border:1px solid var(--border-default); border-radius:var(--radius-lg); padding:16px; }
         .module { margin-bottom:24px; }
         .module:last-child { margin-bottom:0; }

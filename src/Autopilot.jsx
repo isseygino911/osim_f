@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { narrateAutopilot } from "./narrator.js";
 import { useCountdown, RefetchStatus } from "./RefetchStatus.jsx";
 import NewsDetailDrawer from "./NewsDetailDrawer.jsx";
+import useMediaQuery from "./useMediaQuery.js";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:8787";
 const NEWS_POLL_MS = 2 * 60 * 1000;
@@ -125,13 +126,14 @@ export function IndicatorsPanel({ data, error, secondsLeft, status, active = nul
   );
 }
 
-export function NewsPanel({ symbol = "QQQ" }) {
+export function NewsPanel({ symbol = "QQQ", fullHeight = false, compact = false }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
   const [lastFetchAt, setLastFetchAt] = useState(null);
   const [lastFetchOk, setLastFetchOk] = useState(null);
   const [openItem, setOpenItem] = useState(null);
+  const isMobile = useMediaQuery("(max-width: 767px)");
   // sequence guard: the poll effect and the manual Refresh button can both have a
   // request in flight at once (each /api/news call can take up to ~8s), so track
   // which call is the latest and drop any response that resolves after it, the
@@ -171,91 +173,161 @@ export function NewsPanel({ symbol = "QQQ" }) {
   const secondsLeft = useCountdown(NEWS_POLL_MS, lastFetchAt);
   const status = lastFetchOk == null ? null : lastFetchOk ? "success" : "error";
 
+  const headerRow = (
+    <div className="row">
+      <RefetchStatus secondsLeft={secondsLeft} status={status} />
+      {data?.analysisMode === "gemini" && (
+        <span
+          className="mono"
+          style={{ color: "#4C8DFF", fontSize: 10, fontWeight: 600 }}
+          title={data.aiUsage ? `${data.aiUsage.calls} Gemini call(s), ${data.aiUsage.totalTokens.toLocaleString()} tokens total (${data.aiUsage.model})` : undefined}
+        >
+          GEMINI{data.aiUsage && ` · ${data.aiUsage.totalTokens.toLocaleString()}tok · $${estCost(data.aiUsage).toFixed(4)}`}
+        </span>
+      )}
+      {data?.overall && (
+        <span className={`mono ${sentClass(data.overall.sentiment)}`} style={{ fontSize: 12, fontWeight: 600 }}>
+          {data.overall.sentiment.toUpperCase()} ({data.overall.score > 0 ? "+" : ""}{data.overall.score})
+        </span>
+      )}
+      <button className="ghost" onClick={() => load(true)} disabled={loading}>{loading ? "…" : "Refresh"}</button>
+    </div>
+  );
+
+  const list = (
+    <div className={fullHeight ? "news-log news-log-full" : "news-log trade-log"}>
+      <AnimatePresence initial={false}>
+        {(data?.relevantItems ?? []).slice(0, 20).map((item) => (
+          <motion.div
+            key={item.link || item.title}
+            layout
+            initial={{ opacity: 0, y: -6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2, ease: "easeOut" }}
+            style={{ padding: "6px 0", borderBottom: "1px solid #1A1D21" }}
+          >
+            {isMobile && (
+              <div className={`mono ${sentClass(item.direction ?? item.sentiment)}`} style={{ fontSize: 11, marginBottom: 2 }}>
+                {item.direction ?? item.sentiment}
+              </div>
+            )}
+            <a
+              href={item.link}
+              target="_blank"
+              rel="noreferrer"
+              title={item.aiReason || undefined}
+              style={{ color: "#E7E9EA", textDecoration: "none", fontSize: 13, cursor: "pointer" }}
+              onClick={(e) => { e.preventDefault(); setOpenItem(item); }}
+            >
+              {item.title}
+            </a>
+            <div className="row" style={{ marginTop: 2, fontSize: 11 }}>
+              {item.relevanceScore != null && (
+                <span className="mono muted" style={{ border: "1px solid #2A2F35", borderRadius: 4, padding: "0 4px" }}>
+                  R{item.relevanceScore}
+                </span>
+              )}
+              <span className="muted">{item.source}</span>
+              {!isMobile && (
+                <span className={sentClass(item.direction ?? item.sentiment)}>{item.direction ?? item.sentiment}</span>
+              )}
+              {item.analysisSource === "gemini" && (
+                <span className="mono" style={{ color: "#4C8DFF", fontSize: 10 }}>AI</span>
+              )}
+              {item.publishedAt && <span className="muted">{new Date(item.publishedAt).toLocaleTimeString()}</span>}
+            </div>
+          </motion.div>
+        ))}
+      </AnimatePresence>
+      {data?.items?.length > 0 && !data?.relevantItems?.length && (
+        <div className="muted" style={{ fontSize: 12 }}>
+          No {symbol}-relevant headlines right now (relevance ≥ 25) — {data.items.length} headlines scanned.
+        </div>
+      )}
+      {!data?.items?.length && !error && <div className="muted">Loading news…</div>}
+    </div>
+  );
+
+  if (compact) {
+    return (
+      <div className="news-compact">
+        <div className="news-compact-header">
+          <div className="news-compact-title">{symbol}-relevant news</div>
+          {headerRow}
+        </div>
+        {error && <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>{error}</div>}
+        {list}
+        {openItem && <NewsDetailDrawer item={openItem} symbol={symbol} onClose={() => setOpenItem(null)} variant={isMobile ? "sheet" : "centered"} />}
+      </div>
+    );
+  }
+
   return (
     <div className="module">
       <div className="module-header row" style={{ justifyContent: "space-between" }}>
         <div className="section-title" style={{ margin: 0 }}>{symbol}-relevant news</div>
-        <div className="row">
-          <RefetchStatus secondsLeft={secondsLeft} status={status} />
-          {data?.analysisMode === "gemini" && (
-            <span
-              className="mono"
-              style={{ color: "#4C8DFF", fontSize: 10, fontWeight: 600 }}
-              title={data.aiUsage ? `${data.aiUsage.calls} Gemini call(s), ${data.aiUsage.totalTokens.toLocaleString()} tokens total (${data.aiUsage.model})` : undefined}
-            >
-              GEMINI{data.aiUsage && ` · ${data.aiUsage.totalTokens.toLocaleString()}tok · $${estCost(data.aiUsage).toFixed(4)}`}
-            </span>
-          )}
-          {data?.overall && (
-            <span className={`mono ${sentClass(data.overall.sentiment)}`} style={{ fontSize: 12, fontWeight: 600 }}>
-              {data.overall.sentiment.toUpperCase()} ({data.overall.score > 0 ? "+" : ""}{data.overall.score})
-            </span>
-          )}
-          <button className="ghost" onClick={() => load(true)} disabled={loading}>{loading ? "…" : "Refresh"}</button>
-        </div>
+        {headerRow}
       </div>
       <div className="card">
         {error && <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>{error}</div>}
-        <div className="trade-log">
-          <AnimatePresence initial={false}>
-            {(data?.relevantItems ?? []).slice(0, 20).map((item) => (
-              <motion.div
-                key={item.link || item.title}
-                layout
-                initial={{ opacity: 0, y: -6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.2, ease: "easeOut" }}
-                style={{ padding: "6px 0", borderBottom: "1px solid #1A1D21" }}
-              >
-                <a
-                  href={item.link}
-                  target="_blank"
-                  rel="noreferrer"
-                  title={item.aiReason || undefined}
-                  style={{ color: "#E7E9EA", textDecoration: "none", fontSize: 13, cursor: "pointer" }}
-                  onClick={(e) => { e.preventDefault(); setOpenItem(item); }}
-                >
-                  {item.title}
-                </a>
-                <div className="row" style={{ marginTop: 2, fontSize: 11 }}>
-                  {item.relevanceScore != null && (
-                    <span className="mono muted" style={{ border: "1px solid #2A2F35", borderRadius: 4, padding: "0 4px" }}>
-                      R{item.relevanceScore}
-                    </span>
-                  )}
-                  <span className="muted">{item.source}</span>
-                  <span className={sentClass(item.direction ?? item.sentiment)}>{item.direction ?? item.sentiment}</span>
-                  {item.analysisSource === "gemini" && (
-                    <span className="mono" style={{ color: "#4C8DFF", fontSize: 10 }}>AI</span>
-                  )}
-                  {item.publishedAt && <span className="muted">{new Date(item.publishedAt).toLocaleTimeString()}</span>}
-                </div>
-              </motion.div>
-            ))}
-          </AnimatePresence>
-          {data?.items?.length > 0 && !data?.relevantItems?.length && (
-            <div className="muted" style={{ fontSize: 12 }}>
-              No {symbol}-relevant headlines right now (relevance ≥ 25) — {data.items.length} headlines scanned.
-            </div>
-          )}
-          {!data?.items?.length && !error && <div className="muted">Loading news…</div>}
-        </div>
+        {list}
       </div>
-      {openItem && <NewsDetailDrawer item={openItem} symbol={symbol} onClose={() => setOpenItem(null)} />}
+      {openItem && <NewsDetailDrawer item={openItem} symbol={symbol} onClose={() => setOpenItem(null)} variant={isMobile ? "sheet" : "centered"} />}
     </div>
   );
 }
 
 // Presentational: compares news direction against options-market positioning.
 // Fed from signalData.newsVsOptions, which App.jsx already fetches each poll.
-export function DivergencePanel({ signal, error }) {
+export function DivergencePanel({ signal, error, hideHeader = false }) {
   const nvo = signal?.newsVsOptions;
   const verdictStyle =
     nvo?.verdict === "aligned" ? "green" : nvo?.verdict === "divergent" ? "amber" : "muted";
   const biasLabel = (bias) =>
     bias > 15 ? "bullish positioning" : bias < -15 ? "pricing downside" : "balanced";
   const pct = (x, dp = 1) => (x == null ? "—" : (x * 100).toFixed(dp));
+
+  const inner = (
+    <>
+      {error && <div className="muted" style={{ fontSize: 12 }}>{error}</div>}
+      {!nvo && !error && <div className="muted">Loading…</div>}
+      {nvo && (
+        <>
+          <div className="mono" style={{ fontSize: 12 }}>
+            news <span className={sentClass(nvo.newsSentiment)}>{nvo.newsScore > 0 ? "+" : ""}{nvo.newsScore} ({nvo.newsSentiment})</span>
+            <span className="muted"> vs </span>
+            options <span className={nvo.optionsBias > 15 ? "green" : nvo.optionsBias < -15 ? "red" : "amber"}>
+              {nvo.optionsBias > 0 ? "+" : ""}{nvo.optionsBias} ({biasLabel(nvo.optionsBias)})
+            </span>
+          </div>
+          <table style={{ marginTop: 10 }}>
+            <tbody>
+              <tr>
+                <td className="muted" style={{ textAlign: "left" }}>25Δ IV skew (put − call)</td>
+                <td className="mono">{nvo.factors ? `${pct(nvo.factors.ivSkew)} pts` : "—"}</td>
+              </tr>
+              <tr>
+                <td className="muted" style={{ textAlign: "left" }}>Put/Call open interest</td>
+                <td className="mono">{nvo.factors?.oiRatio?.toFixed(2) ?? "—"}</td>
+              </tr>
+              <tr>
+                <td className="muted" style={{ textAlign: "left" }}>ATM implied vol</td>
+                <td className="mono">{nvo.factors?.atmIv != null ? pct(nvo.factors.atmIv, 0) + "%" : "—"}</td>
+              </tr>
+              <tr>
+                <td className="muted" style={{ textAlign: "left" }}>News sample</td>
+                <td className="mono">{nvo.sampleSize} headlines</td>
+              </tr>
+            </tbody>
+          </table>
+          <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>{nvo.implication}</div>
+        </>
+      )}
+    </>
+  );
+
+  if (hideHeader) return <div style={{ marginTop: 10 }}>{inner}</div>;
 
   return (
     <div className="module">
@@ -267,42 +339,7 @@ export function DivergencePanel({ signal, error }) {
           </span>
         )}
       </div>
-      <div className="card">
-        {error && <div className="muted" style={{ fontSize: 12 }}>{error}</div>}
-        {!nvo && !error && <div className="muted">Loading…</div>}
-        {nvo && (
-          <>
-            <div className="mono" style={{ fontSize: 12 }}>
-              news <span className={sentClass(nvo.newsSentiment)}>{nvo.newsScore > 0 ? "+" : ""}{nvo.newsScore} ({nvo.newsSentiment})</span>
-              <span className="muted"> vs </span>
-              options <span className={nvo.optionsBias > 15 ? "green" : nvo.optionsBias < -15 ? "red" : "amber"}>
-                {nvo.optionsBias > 0 ? "+" : ""}{nvo.optionsBias} ({biasLabel(nvo.optionsBias)})
-              </span>
-            </div>
-            <table style={{ marginTop: 10 }}>
-              <tbody>
-                <tr>
-                  <td className="muted" style={{ textAlign: "left" }}>25Δ IV skew (put − call)</td>
-                  <td className="mono">{nvo.factors ? `${pct(nvo.factors.ivSkew)} pts` : "—"}</td>
-                </tr>
-                <tr>
-                  <td className="muted" style={{ textAlign: "left" }}>Put/Call open interest</td>
-                  <td className="mono">{nvo.factors?.oiRatio?.toFixed(2) ?? "—"}</td>
-                </tr>
-                <tr>
-                  <td className="muted" style={{ textAlign: "left" }}>ATM implied vol</td>
-                  <td className="mono">{nvo.factors?.atmIv != null ? pct(nvo.factors.atmIv, 0) + "%" : "—"}</td>
-                </tr>
-                <tr>
-                  <td className="muted" style={{ textAlign: "left" }}>News sample</td>
-                  <td className="mono">{nvo.sampleSize} headlines</td>
-                </tr>
-              </tbody>
-            </table>
-            <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>{nvo.implication}</div>
-          </>
-        )}
-      </div>
+      <div className="card">{inner}</div>
     </div>
   );
 }
@@ -310,62 +347,68 @@ export function DivergencePanel({ signal, error }) {
 // Presentational: fed from signalData.volSurface (App.jsx's existing /api/signal poll).
 // Skew/term-structure/VRP context, distinct from the single ATM-IV read GreeksPanel
 // already shows — informational only, same as DivergencePanel.
-export function VolSurfacePanel({ signal, error }) {
+export function VolSurfacePanel({ signal, error, hideHeader = false }) {
   const vs = signal?.volSurface;
   const pct = (x, dp = 1) => (x == null ? "—" : (x * 100).toFixed(dp) + "%");
   const pts = (x, dp = 1) => (x == null ? "—" : (x >= 0 ? "+" : "") + (x * 100).toFixed(dp) + "pts");
   const slopeLabel = vs?.term?.slope == null ? "" : vs.term.slope >= 0 ? "contango (calm)" : "inverted (stress priced in)";
   const vrpLabel = vs?.vol?.vrp == null ? "" : vs.vol.vrp >= 0 ? "richer than realized" : "cheaper than realized";
 
+  const inner = (
+    <>
+      {error && <div className="muted" style={{ fontSize: 12 }}>{error}</div>}
+      {!vs && !error && <div className="muted">Loading…</div>}
+      {vs && (
+        <table>
+          <tbody>
+            <tr>
+              <td className="muted" style={{ textAlign: "left" }}>Skew (25Δ put − call)</td>
+              <td className="mono">
+                {vs.skew?.put25d != null && vs.skew?.call25d != null ? pts(vs.skew.put25d - vs.skew.call25d) : "—"}
+              </td>
+            </tr>
+            <tr>
+              <td className="muted" style={{ textAlign: "left" }}>Wing skew (10Δ put − call)</td>
+              <td className="mono">
+                {vs.skew?.put10d != null && vs.skew?.call10d != null ? pts(vs.skew.put10d - vs.skew.call10d) : "—"}
+              </td>
+            </tr>
+            <tr>
+              <td className="muted" style={{ textAlign: "left" }}>Term structure</td>
+              <td className="mono">
+                {vs.term ? (
+                  <>
+                    {pct(vs.term.nearAtmIv, 0)} ({vs.term.nearExpiration}) → {pct(vs.term.farAtmIv, 0)} ({vs.term.farExpiration})
+                    <span className="muted"> · {slopeLabel}</span>
+                  </>
+                ) : "—"}
+              </td>
+            </tr>
+            <tr>
+              <td className="muted" style={{ textAlign: "left" }}>ATM IV vs realized (20d)</td>
+              <td className="mono">
+                {vs.vol ? (
+                  <>
+                    {pct(vs.vol.atmIv, 0)} vs {pct(vs.vol.realizedVol20d, 0)}
+                    {vs.vol.vrp != null && <span className="muted"> · VRP {pts(vs.vol.vrp)} ({vrpLabel})</span>}
+                  </>
+                ) : "—"}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      )}
+    </>
+  );
+
+  if (hideHeader) return <div style={{ marginTop: 10 }}>{inner}</div>;
+
   return (
     <div className="module">
       <div className="module-header row" style={{ justifyContent: "space-between" }}>
         <div className="section-title" style={{ margin: 0 }}>Volatility surface</div>
       </div>
-      <div className="card">
-        {error && <div className="muted" style={{ fontSize: 12 }}>{error}</div>}
-        {!vs && !error && <div className="muted">Loading…</div>}
-        {vs && (
-          <table>
-            <tbody>
-              <tr>
-                <td className="muted" style={{ textAlign: "left" }}>Skew (25Δ put − call)</td>
-                <td className="mono">
-                  {vs.skew?.put25d != null && vs.skew?.call25d != null ? pts(vs.skew.put25d - vs.skew.call25d) : "—"}
-                </td>
-              </tr>
-              <tr>
-                <td className="muted" style={{ textAlign: "left" }}>Wing skew (10Δ put − call)</td>
-                <td className="mono">
-                  {vs.skew?.put10d != null && vs.skew?.call10d != null ? pts(vs.skew.put10d - vs.skew.call10d) : "—"}
-                </td>
-              </tr>
-              <tr>
-                <td className="muted" style={{ textAlign: "left" }}>Term structure</td>
-                <td className="mono">
-                  {vs.term ? (
-                    <>
-                      {pct(vs.term.nearAtmIv, 0)} ({vs.term.nearExpiration}) → {pct(vs.term.farAtmIv, 0)} ({vs.term.farExpiration})
-                      <span className="muted"> · {slopeLabel}</span>
-                    </>
-                  ) : "—"}
-                </td>
-              </tr>
-              <tr>
-                <td className="muted" style={{ textAlign: "left" }}>ATM IV vs realized (20d)</td>
-                <td className="mono">
-                  {vs.vol ? (
-                    <>
-                      {pct(vs.vol.atmIv, 0)} vs {pct(vs.vol.realizedVol20d, 0)}
-                      {vs.vol.vrp != null && <span className="muted"> · VRP {pts(vs.vol.vrp)} ({vrpLabel})</span>}
-                    </>
-                  ) : "—"}
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        )}
-      </div>
+      <div className="card">{inner}</div>
     </div>
   );
 }
@@ -373,7 +416,7 @@ export function VolSurfacePanel({ signal, error }) {
 // Presentational: fed from signalData.gammaExposure. Dealer gamma positioning —
 // positive net GEX suggests hedging flows dampen moves (pinning near high-gamma
 // strikes); negative suggests hedging amplifies moves. Informational only.
-export function GammaExposurePanel({ signal, error }) {
+export function GammaExposurePanel({ signal, error, hideHeader = false }) {
   const gex = signal?.gammaExposure;
   const fmtGex = (n) => (n == null ? "—" : (n >= 0 ? "+" : "") + (n / 1e6).toFixed(2) + "M");
   const regimeLabel = gex?.netGex == null ? "" : gex.netGex >= 0 ? "positive (dampening / pinning)" : "negative (amplifying)";
@@ -381,6 +424,37 @@ export function GammaExposurePanel({ signal, error }) {
   const topStrikes = gex?.byStrike?.length
     ? [...gex.byStrike].sort((a, b) => Math.abs(b.gex) - Math.abs(a.gex)).slice(0, 3)
     : [];
+
+  const inner = (
+    <>
+      {error && <div className="muted" style={{ fontSize: 12 }}>{error}</div>}
+      {!gex && !error && <div className="muted">Loading…</div>}
+      {gex && gex.netGex == null && <div className="muted">Not enough gamma/open-interest data on this chain yet.</div>}
+      {gex && gex.netGex != null && (
+        <>
+          <div className="mono" style={{ fontSize: 12 }}>
+            Net dealer gamma <span className={regimeCls}>{regimeLabel}</span>
+          </div>
+          <table style={{ marginTop: 10 }}>
+            <tbody>
+              <tr>
+                <td className="muted" style={{ textAlign: "left" }}>Zero-gamma strike</td>
+                <td className="mono">{gex.zeroGammaStrike ?? "—"}</td>
+              </tr>
+              {topStrikes.map((s) => (
+                <tr key={s.strike}>
+                  <td className="muted" style={{ textAlign: "left" }}>Strike {s.strike}</td>
+                  <td className={`mono ${s.gex >= 0 ? "green" : "red"}`}>{fmtGex(s.gex)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+    </>
+  );
+
+  if (hideHeader) return <div style={{ marginTop: 10 }}>{inner}</div>;
 
   return (
     <div className="module">
@@ -392,55 +466,42 @@ export function GammaExposurePanel({ signal, error }) {
           </span>
         )}
       </div>
-      <div className="card">
-        {error && <div className="muted" style={{ fontSize: 12 }}>{error}</div>}
-        {!gex && !error && <div className="muted">Loading…</div>}
-        {gex && gex.netGex == null && <div className="muted">Not enough gamma/open-interest data on this chain yet.</div>}
-        {gex && gex.netGex != null && (
-          <>
-            <div className="mono" style={{ fontSize: 12 }}>
-              Net dealer gamma <span className={regimeCls}>{regimeLabel}</span>
-            </div>
-            <table style={{ marginTop: 10 }}>
-              <tbody>
-                <tr>
-                  <td className="muted" style={{ textAlign: "left" }}>Zero-gamma strike</td>
-                  <td className="mono">{gex.zeroGammaStrike ?? "—"}</td>
-                </tr>
-                {topStrikes.map((s) => (
-                  <tr key={s.strike}>
-                    <td className="muted" style={{ textAlign: "left" }}>Strike {s.strike}</td>
-                    <td className={`mono ${s.gex >= 0 ? "green" : "red"}`}>{fmtGex(s.gex)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </>
-        )}
-      </div>
+      <div className="card">{inner}</div>
     </div>
   );
 }
 
 // Presentational: App.jsx owns the /api/greeks + /api/signal fetches so this panel
 // and the chain-table pick highlighting share one request per poll.
-export function GreeksPanel({ greeks, signal, error, secondsLeft, status }) {
-  const shell = (body) => (
-    <div className="module">
-      <div className="module-header row" style={{ justifyContent: "space-between" }}>
-        <div className="section-title" style={{ margin: 0 }}>Options analysis</div>
-        <div className="row">
-          <RefetchStatus secondsLeft={secondsLeft} status={status} />
-          {signal && Number.isFinite(signal.optionsScore) && (
-            <span className={`mono ${signal.optionsScore <= -40 ? "red" : signal.optionsScore < 0 ? "amber" : "green"}`} style={{ fontSize: 12, fontWeight: 600 }}>
-              {signal.optionsScore === 0 ? "CONDITIONS CLEAR" : `CONDITIONS ${signal.optionsScore.toFixed(1)}`}
-            </span>
-          )}
+export function GreeksPanel({ greeks, signal, error, secondsLeft, status, hideHeader = false }) {
+  const shell = (body) =>
+    hideHeader ? (
+      <div style={{ marginTop: 10 }}>{body}</div>
+    ) : (
+      <div className="module">
+        <div className="module-header row" style={{ justifyContent: "space-between" }}>
+          <div className="section-title" style={{ margin: 0 }}>Options analysis</div>
+          <div className="row">
+            <RefetchStatus secondsLeft={secondsLeft} status={status} />
+            {signal && Number.isFinite(signal.optionsScore) && (
+              <span className={`mono ${signal.optionsScore <= -40 ? "red" : signal.optionsScore < 0 ? "amber" : "green"}`} style={{ fontSize: 12, fontWeight: 600 }}>
+                {signal.optionsScore === 0 ? "CONDITIONS CLEAR" : `CONDITIONS ${signal.optionsScore.toFixed(1)}`}
+              </span>
+            )}
+            <a
+              href="/docs/how-it-works.html"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="ghost"
+              title="How the signal score is computed"
+            >
+              How it works
+            </a>
+          </div>
         </div>
+        <div className="card">{body}</div>
       </div>
-      <div className="card">{body}</div>
-    </div>
-  );
+    );
   if (error) return shell(<div className="muted" style={{ fontSize: 12 }}>{error}</div>);
   if (!greeks || !signal) return shell(<div className="muted">Loading…</div>);
 
@@ -602,21 +663,32 @@ export function AutopilotPanel({ symbol = "QQQ" }) {
 
   return (
     <div className="module">
-      <div className="module-header row" style={{ justifyContent: "space-between" }}>
-        <div className="row">
-          <span className={`dot ${status.enabled ? "" : "off"}`} />
-          <div className="section-title" style={{ margin: 0 }}>Autopilot &middot; goal 10%/week</div>
-        </div>
-        <div className="row">
+      <div className="module-header" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <div className="row">
+            <span className={`dot ${status.enabled ? "" : "off"}`} />
+            <div className="section-title" style={{ margin: 0 }}>Autopilot &middot; goal 10%/week</div>
+          </div>
           <RefetchStatus secondsLeft={secondsLeft} status={fetchStatus} />
-          <button className="ghost" onClick={runNow} disabled={busy}>Run now</button>
-          <button className={status.enabled ? "sell" : "buy"} onClick={toggle} disabled={busy}>
+        </div>
+        <div className="row" style={{ justifyContent: "flex-end" }}>
+          <button className="ghost small" onClick={runNow} disabled={busy}>Run now</button>
+          <button className={`small ${status.enabled ? "sell" : "buy"}`} onClick={toggle} disabled={busy}>
             {status.enabled ? "Stop" : "Start"}
           </button>
+          <a
+            href="/docs/how-autopilot-works.html"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="ghost small"
+            title="How autopilot decides its trades"
+          >
+            How it works
+          </a>
         </div>
       </div>
 
-      <div className="card">
+      <div style={{ marginTop: 14 }}>
       <div className="muted" style={{ fontSize: 12, lineHeight: 1.5 }}>{narrateAutopilot(status)}</div>
 
       {error && <div className="err" style={{ marginTop: 10 }}>{error}</div>}
@@ -686,7 +758,7 @@ export function AutopilotPanel({ symbol = "QQQ" }) {
 
       {status.weekHistory?.length > 0 && (
         <>
-          <div className="section-title" style={{ marginTop: 18 }}>Weekly history</div>
+          <div className="subsection-title">Weekly history</div>
           <table>
             <thead><tr><th>Week of</th><th>P&amp;L %</th></tr></thead>
             <tbody>
@@ -703,7 +775,7 @@ export function AutopilotPanel({ symbol = "QQQ" }) {
 
       {status.trades?.length > 0 && (
         <>
-          <div className="section-title" style={{ marginTop: 18 }}>Autopilot trade log</div>
+          <div className="subsection-title">Autopilot trade log</div>
           <div className="trade-log">
             <AnimatePresence initial={false}>
             {status.trades.slice(0, 30).map((t) => (

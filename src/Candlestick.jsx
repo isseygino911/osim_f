@@ -109,29 +109,53 @@ function toLineData(values, bars) {
   return out;
 }
 
-function DragHandle({ onDragStart, onDragEnd }) {
+function DragHandle({ onDragStart, onDragEnd, onTouchStart, onTouchMove, onTouchEnd, pulse }) {
   return (
-    <span className="drag-handle" draggable onDragStart={onDragStart} onDragEnd={onDragEnd} title="Drag to reorder">
+    <span
+      className={`drag-handle ${pulse ? "drag-handle-pulse" : ""}`}
+      draggable
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      onTouchStart={onTouchStart}
+      onTouchMove={onTouchMove}
+      onTouchEnd={onTouchEnd}
+      title="Drag to reorder"
+    >
       ⠿
     </span>
   );
 }
 
 const TOOLTIP_W = 190; // estimated rendered width, used only for edge-flip math
+const TOOLTIP_H = 120; // estimated rendered height, used only for vertical edge-flip math
 const TOOLTIP_MARGIN = 12;
+const TOUCH_HOLD_CLEAR_DELAY_MS = 400; // tap-and-hold: linger after release so a quick tap is still readable
+const LONG_PRESS_MS = 300; // touch long-press threshold to enter pane-reorder mode
+const LONG_PRESS_MOVE_TOLERANCE = 10; // px of finger movement allowed before the long-press timer is cancelled
 
-function tooltipPos(clientX, clientY, containerW) {
+// clamps a tooltip's position to stay within [0, containerW] x [0, containerH], flipping
+// above the touch/cursor point when there isn't room below (containerH is only supplied
+// by touch callers today — mouse hover keeps the original "always below" placement since
+// desktop tooltips have more room and no finger to avoid occluding).
+function tooltipPos(clientX, clientY, containerW, containerH) {
   let left = clientX + TOOLTIP_MARGIN;
   if (left + TOOLTIP_W > containerW) left = clientX - TOOLTIP_MARGIN - TOOLTIP_W;
   left = Math.max(4, left);
-  return { left, top: clientY + TOOLTIP_MARGIN };
+  let top = clientY + TOOLTIP_MARGIN;
+  if (containerH != null) {
+    // offset above the touch point by default (so the tooltip never sits under the
+    // finger), flipping below only if there isn't room above
+    top = clientY - TOOLTIP_MARGIN - TOOLTIP_H;
+    if (top < 4) top = Math.min(clientY + TOOLTIP_MARGIN + 16, containerH - TOOLTIP_H - 4);
+  }
+  return { left, top };
 }
 
 // Hover tooltip: full OHLCV + every active indicator's value at the hovered bar, shown
 // near the cursor regardless of which pane (price or an oscillator) is being hovered.
-function ChartTooltip({ bar, interval, legend, x, y, containerW }) {
+function ChartTooltip({ bar, interval, legend, x, y, containerW, containerH }) {
   const up = bar.close >= bar.open;
-  const { left, top } = tooltipPos(x, y, containerW);
+  const { left, top } = tooltipPos(x, y, containerW, containerH);
   const dateLabel =
     interval === "1d"
       ? new Date(bar.t).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })
@@ -360,7 +384,7 @@ class VpvrRenderer {
 // bars: [{ t: ISO string, open, high, low, close, volume }], oldest first
 // series: the `series` object from GET /api/indicators (optional)
 // active: array of indicator keys from indicatorConfig to draw (optional)
-export default function Candlestick({ bars, height = 280, series = null, active = [], interval = "1d" }) {
+export default function Candlestick({ bars, height = 280, series = null, active = [], interval = "1d", isMobile = false }) {
   const hostRef = useRef(null); // element lightweight-charts renders into
   const outerRef = useRef(null); // outer wrapper, used for tooltip/header positioning
   const chartRef = useRef(null);
@@ -385,6 +409,9 @@ export default function Candlestick({ bars, height = 280, series = null, active 
   const [hover, setHover] = useState(null); // { index, clientX, clientY }
   const [anchorT, setAnchorT] = useState(() => loadKey(K_AVWAP_ANCHOR, null)?.t ?? null);
   const [paneRects, setPaneRects] = useState({}); // paneKey -> { top, height } in px, relative to outerRef — drives header overlay position
+  const [reorderPulseKey, setReorderPulseKey] = useState(null); // pane key showing the brief long-press-entry border flash
+  const touchHoldClearRef = useRef(null); // timer id: delays clearing `hover` after touch release
+  const longPressRef = useRef(null); // { timer, key, startY, startX, active }
 
   const avwapOn = active.includes("avwap");
   const vpvrOn = active.includes("vpvr");
@@ -793,8 +820,17 @@ export default function Candlestick({ bars, height = 280, series = null, active 
       const fallback = key === "price" ? height : PANE_HEIGHT;
       pane.setStretchFactor(paneHeightsRef.current[key] ?? fallback);
     });
-    queueMicrotask(() => {
-      suppressResizePersistRef.current = false;
+    // ResizeObserver callbacks fire after layout, on a later animation frame — a
+    // microtask clears the suppress flag too early and lets the observer see this
+    // programmatic setStretchFactor() as a "drag", persist its (slightly different)
+    // measured height, which changes paneHeights state, which changes totalHeight,
+    // which resizes the host div, re-triggering the observer — a feedback loop that
+    // walks the price pane down to PRICE_HEIGHT_RANGE's floor a few px at a time.
+    // Wait two rAFs (past the layout + observer's own callback frame) before re-arming.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        suppressResizePersistRef.current = false;
+      });
     });
 
     // (re)watch each visible pane's HTML element for native drag-resize changes
@@ -862,6 +898,108 @@ export default function Candlestick({ bars, height = 280, series = null, active 
     setDragOverKey(null);
   }
 
+  // ---- touch: tap-and-hold crosshair (replaces mouse hover on touch devices) -------
+  // Only handles single-finger touches — two-finger pinch/pan is left alone so
+  // lightweight-charts' own native touch handling (pinch-zoom, two-finger pan) still
+  // reaches the chart untouched.
+  function pointFromTouch(e) {
+    const outer = outerRef.current;
+    if (!outer) return null;
+    const rect = outer.getBoundingClientRect();
+    const touch = e.touches[0] ?? e.changedTouches[0];
+    if (!touch) return null;
+    return { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
+  }
+  function indexFromX(x) {
+    const chart = chartRef.current;
+    if (!chart || !barsRef.current.length) return null;
+    const logical = chart.timeScale().coordinateToLogical(x);
+    if (logical == null) return null;
+    return Math.max(0, Math.min(barsRef.current.length - 1, Math.round(logical)));
+  }
+  function handleChartTouchStart(e) {
+    if (e.touches.length !== 1) return;
+    if (touchHoldClearRef.current) {
+      clearTimeout(touchHoldClearRef.current);
+      touchHoldClearRef.current = null;
+    }
+    const p = pointFromTouch(e);
+    if (!p) return;
+    const idx = indexFromX(p.x);
+    if (idx == null) return;
+    setHover({ index: idx, clientX: p.x, clientY: p.y });
+  }
+  function handleChartTouchMove(e) {
+    if (e.touches.length !== 1) return;
+    const p = pointFromTouch(e);
+    if (!p) return;
+    const idx = indexFromX(p.x);
+    if (idx == null) return;
+    setHover({ index: idx, clientX: p.x, clientY: p.y });
+  }
+  function handleChartTouchEnd() {
+    // linger briefly after release so a quick tap-to-check-a-bar doesn't feel like it
+    // vanished before it was read
+    if (touchHoldClearRef.current) clearTimeout(touchHoldClearRef.current);
+    touchHoldClearRef.current = setTimeout(() => setHover(null), TOUCH_HOLD_CLEAR_DELAY_MS);
+  }
+
+  // ---- touch: long-press-to-reorder (replaces HTML5 drag-and-drop on touch) --------
+  function handleHandleTouchStart(e, key) {
+    if (e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    const lp = { startX: touch.clientX, startY: touch.clientY, key, active: false };
+    longPressRef.current = lp;
+    lp.timer = setTimeout(() => {
+      lp.active = true;
+      setDragKey(key);
+      setReorderPulseKey(key);
+      setTimeout(() => setReorderPulseKey((k) => (k === key ? null : k)), 150);
+    }, LONG_PRESS_MS);
+  }
+  function handleHandleTouchMove(e) {
+    const lp = longPressRef.current;
+    if (!lp || e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    const dx = touch.clientX - lp.startX;
+    const dy = touch.clientY - lp.startY;
+    if (!lp.active) {
+      if (Math.hypot(dx, dy) > LONG_PRESS_MOVE_TOLERANCE) {
+        clearTimeout(lp.timer);
+        longPressRef.current = null;
+      }
+      return;
+    }
+    // in reorder mode: find which visible pane header the finger is currently over
+    // by Y position and swap it into place, mirroring the mouse dragover swap logic
+    e.preventDefault();
+    const outer = outerRef.current;
+    if (!outer) return;
+    const outerRect = outer.getBoundingClientRect();
+    const y = touch.clientY - outerRect.top;
+    let overKey = null;
+    for (const k of visiblePanesRef.current) {
+      const rect = paneRectsRef.current[k];
+      if (!rect) continue;
+      if (y >= rect.top && y <= rect.top + rect.height) {
+        overKey = k;
+        break;
+      }
+    }
+    if (overKey && overKey !== lp.key) {
+      setDragOverKey(overKey);
+      setOrder((o) => moveItem(o, lp.key, overKey));
+      lp.key = overKey; // track the pane's new position so subsequent swaps compare correctly
+    }
+  }
+  function handleHandleTouchEnd() {
+    const lp = longPressRef.current;
+    if (lp?.timer) clearTimeout(lp.timer);
+    longPressRef.current = null;
+    setDragKey(null);
+    setDragOverKey(null);
+  }
+
   if (!bars.length) {
     return <div className="muted" style={{ padding: "20px 0" }}>No candle data yet.</div>;
   }
@@ -897,43 +1035,81 @@ export default function Candlestick({ bars, height = 280, series = null, active 
 
   return (
     <div style={{ position: "relative", width: "100%" }}>
-      <div className="row" style={{ justifyContent: "space-between", marginBottom: 4, fontSize: 12 }}>
-        <span className="mono">
-          O <span className={hUp ? "green" : "red"}>{h.open.toFixed(2)}</span>{"  "}
-          H <span className={hUp ? "green" : "red"}>{h.high.toFixed(2)}</span>{"  "}
-          L <span className={hUp ? "green" : "red"}>{h.low.toFixed(2)}</span>{"  "}
-          C <span className={hUp ? "green" : "red"}>{h.close.toFixed(2)}</span>
-        </span>
-        <span className="muted mono">
-          {interval === "1d"
-            ? new Date(h.t).toLocaleDateString(undefined, { month: "short", day: "numeric" })
-            : new Date(h.t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
-          {" "}&middot; vol {h.volume.toLocaleString()}
-        </span>
-      </div>
+      {isMobile ? (
+        <>
+          <div className="mono muted" style={{ marginBottom: 4, fontSize: 12 }}>
+            {interval === "1d"
+              ? new Date(h.t).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+              : new Date(h.t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+          </div>
+          <div className="muted mono" style={{ marginBottom: 4, fontSize: 12 }}>
+            vol {h.volume.toLocaleString()}
+          </div>
+          <div className="mono" style={{ marginBottom: 4, fontSize: 12 }}>
+            O <span className={hUp ? "green" : "red"}>{h.open.toFixed(2)}</span>{"  "}
+            H <span className={hUp ? "green" : "red"}>{h.high.toFixed(2)}</span>{"  "}
+            L <span className={hUp ? "green" : "red"}>{h.low.toFixed(2)}</span>{"  "}
+            C <span className={hUp ? "green" : "red"}>{h.close.toFixed(2)}</span>
+          </div>
 
-      {legend.length > 0 && (
-        <div className="row mono" style={{ flexWrap: "wrap", gap: 10, marginBottom: 8, fontSize: 11 }}>
-          {legend.map((l) => (
-            <span key={l.key} style={{ color: l.color }}>
-              {l.label} <span style={{ opacity: 0.85 }}>{l.text}</span>
+          {legend.length > 0 && (
+            <div className="mono" style={{ marginBottom: 8, fontSize: 11 }}>
+              {legend.map((l) => (
+                <div key={l.key} style={{ display: "block", color: l.color }}>
+                  {l.label} <span style={{ opacity: 0.85 }}>{l.text}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          <div className="row" style={{ justifyContent: "space-between", marginBottom: 4, fontSize: 12 }}>
+            <span className="mono">
+              O <span className={hUp ? "green" : "red"}>{h.open.toFixed(2)}</span>{"  "}
+              H <span className={hUp ? "green" : "red"}>{h.high.toFixed(2)}</span>{"  "}
+              L <span className={hUp ? "green" : "red"}>{h.low.toFixed(2)}</span>{"  "}
+              C <span className={hUp ? "green" : "red"}>{h.close.toFixed(2)}</span>
             </span>
-          ))}
-        </div>
+            <span className="muted mono">
+              {interval === "1d"
+                ? new Date(h.t).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+                : new Date(h.t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+              {" "}&middot; vol {h.volume.toLocaleString()}
+            </span>
+          </div>
+
+          {legend.length > 0 && (
+            <div className="row mono" style={{ flexWrap: "wrap", gap: 10, marginBottom: 8, fontSize: 11 }}>
+              {legend.map((l) => (
+                <span key={l.key} style={{ color: l.color }}>
+                  {l.label} <span style={{ opacity: 0.85 }}>{l.text}</span>
+                </span>
+              ))}
+            </div>
+          )}
+        </>
       )}
 
       <div ref={outerRef} className="pane-card" style={{ position: "relative", width: "100%", padding: 0, overflow: "visible" }}>
-        <div ref={hostRef} style={{ width: "100%", height: totalHeight }} />
+        <div
+          ref={hostRef}
+          style={{ width: "100%", height: totalHeight }}
+          onTouchStart={handleChartTouchStart}
+          onTouchMove={handleChartTouchMove}
+          onTouchEnd={handleChartTouchEnd}
+        />
 
         {visiblePanes.map((paneKey) => {
           const rect = paneRects[paneKey];
           if (!rect) return null;
           const dragging = dragKey === paneKey;
           const isOver = dragOverKey === paneKey && dragKey && dragKey !== paneKey;
+          const pulsing = reorderPulseKey === paneKey;
           return (
             <div
               key={paneKey}
-              className={`pane-card-header ${dragging ? "dragging" : ""} ${isOver ? "drag-over" : ""}`}
+              className={`pane-card-header ${dragging ? "dragging" : ""} ${isOver ? "drag-over" : ""} ${pulsing ? "reorder-pulse" : ""}`}
               style={{
                 position: "absolute",
                 left: 0,
@@ -948,7 +1124,14 @@ export default function Candlestick({ bars, height = 280, series = null, active 
               onDrop={handleDrop}
             >
               <div style={{ pointerEvents: "auto", display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 8px" }}>
-                <DragHandle onDragStart={(e) => handleDragStart(e, paneKey)} onDragEnd={handleDragEnd} />
+                <DragHandle
+                  onDragStart={(e) => handleDragStart(e, paneKey)}
+                  onDragEnd={handleDragEnd}
+                  onTouchStart={(e) => handleHandleTouchStart(e, paneKey)}
+                  onTouchMove={handleHandleTouchMove}
+                  onTouchEnd={handleHandleTouchEnd}
+                  pulse={pulsing}
+                />
                 <span className="pane-card-title" style={{ color: paneColor(paneKey) }}>{paneTitle(paneKey)}</span>
               </div>
             </div>
@@ -964,6 +1147,7 @@ export default function Candlestick({ bars, height = 280, series = null, active 
           x={hover.clientX}
           y={hover.clientY}
           containerW={outerRef.current?.clientWidth ?? 600}
+          containerH={outerRef.current?.clientHeight ?? 600}
         />
       )}
     </div>

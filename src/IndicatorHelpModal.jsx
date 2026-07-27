@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { HELP } from "./indicatorHelp.jsx";
 import { Modal } from "./Modal.jsx";
 
-export default function IndicatorHelpModal({ helpKey, onClose }) {
+export default function IndicatorHelpModal({ helpKey, onClose, variant = "centered" }) {
   const entry = helpKey ? HELP[helpKey] : null;
   // hold the last non-null entry so content stays visible during the exit animation
   const entryRef = useRef(entry);
@@ -22,7 +22,7 @@ export default function IndicatorHelpModal({ helpKey, onClose }) {
   const { title, what, read, how, usage, Diagram } = display;
 
   return (
-    <Modal open={!!entry} onClose={onClose} className="help">
+    <Modal open={!!entry} onClose={onClose} className="help" variant={variant}>
       <div className="section-title">{title}</div>
       <Diagram />
       <div className="section-title" style={{ marginTop: 12 }}>What it measures</div>

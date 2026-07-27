@@ -4,7 +4,7 @@ import { Modal } from "./Modal.jsx";
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:8787";
 const sentClass = (s) => (s === "bullish" ? "green" : s === "bearish" ? "red" : "amber");
 
-export default function NewsDetailDrawer({ item, symbol, onClose }) {
+export default function NewsDetailDrawer({ item, symbol, onClose, variant = "centered" }) {
   const [detail, setDetail] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -47,7 +47,7 @@ export default function NewsDetailDrawer({ item, symbol, onClose }) {
   if (!display) return null;
 
   return (
-    <Modal open={!!item} onClose={onClose} className="help">
+    <Modal open={!!item} onClose={onClose} className="help" variant={variant}>
       <div className="section-title">
         <a href={display.link} target="_blank" rel="noreferrer" style={{ color: "#E7E9EA" }}>
           {display.title}

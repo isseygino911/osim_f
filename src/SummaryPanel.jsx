@@ -4,7 +4,7 @@ const TONE_CLS = { good: "green", caution: "amber", poor: "red", muted: "muted" 
 
 // Beginner-facing translation of the numbers shown elsewhere on the page.
 // Purely presentational — App.jsx owns the snapshot/greeks/signal fetches.
-export default function SummaryPanel({ quote, greeks, signal, symbol = "QQQ" }) {
+export default function SummaryPanel({ quote, greeks, signal, symbol = "QQQ", isMobile = false }) {
   const market = narrateMarket(quote, symbol);
   const exp = signal?.optionsFactors?.expiration ?? greeks?.preview?.expiration ?? null;
   const quality = exp ? greeks?.summary?.[exp] : null;
@@ -16,7 +16,7 @@ export default function SummaryPanel({ quote, greeks, signal, symbol = "QQQ" }) 
     return (
       <div className="module">
         <div className="module-header"><div className="section-title" style={{ margin: 0 }}>What&rsquo;s happening (plain English)</div></div>
-        <div className="card"><div className="muted">Waiting for data — start the server and click &ldquo;Go&rdquo; to fetch a snapshot.</div></div>
+        <div className={isMobile ? undefined : "card"} style={isMobile ? { margin: 5 } : undefined}><div className="muted">Waiting for data — start the server and click &ldquo;Go&rdquo; to fetch a snapshot.</div></div>
       </div>
     );
   }
@@ -24,7 +24,7 @@ export default function SummaryPanel({ quote, greeks, signal, symbol = "QQQ" }) 
   return (
     <div className="module">
         <div className="module-header"><div className="section-title" style={{ margin: 0 }}>What&rsquo;s happening (plain English)</div></div>
-        <div className="card summary">
+        <div className={isMobile ? "summary" : "card summary"} style={isMobile ? { margin: 5 } : undefined}>
 
         {market && (
           <>

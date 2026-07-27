@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import Candlestick from "./Candlestick.jsx";
 import IndicatorHelpModal from "./IndicatorHelpModal.jsx";
-import IndicatorToggles from "./IndicatorToggles.jsx";
+import IndicatorToggles, { IndicatorMenu, DropdownMenu } from "./IndicatorToggles.jsx";
 import { DEFAULT_ACTIVE, sanitizeActive } from "./indicatorConfig.js";
 import { loadKey, saveKey } from "./storage.js";
 import { IndicatorsPanel, NewsPanel, AutopilotPanel, GreeksPanel, DivergencePanel, VolSurfacePanel, GammaExposurePanel } from "./Autopilot.jsx";
@@ -10,11 +10,13 @@ import { Modal } from "./Modal.jsx";
 import SummaryPanel from "./SummaryPanel.jsx";
 import { useCountdown, RefetchStatus } from "./RefetchStatus.jsx";
 import { useRefreshStatusPoll, ActiveRefreshesList, RefreshProgressBanner } from "./RefreshProgress.jsx";
+import useMediaQuery from "./useMediaQuery.js";
 
 // Collapsible section for the lower-priority "deep analytics" panels (vol surface,
 // gamma exposure, divergence) — collapsed by default so the page doesn't force a
-// scroll past dense tables most users only check occasionally.
-function CollapsibleSection({ title, subtitle, defaultOpen = false, children }) {
+// scroll past dense tables most users only check occasionally. Exported so the mobile
+// Signal tab's "Advanced analytics" accordion can reuse it (see App()).
+export function CollapsibleSection({ title, subtitle, defaultOpen = false, children }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
     <div className="module">
@@ -24,10 +26,88 @@ function CollapsibleSection({ title, subtitle, defaultOpen = false, children }) 
         aria-expanded={open}
       >
         <span className="collapsible-caret">{open ? "▾" : "▸"}</span>
-        <span className="section-title" style={{ margin: 0 }}>{title}</span>
-        {subtitle && <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>{subtitle}</span>}
+        <span className="collapsible-title">{title}</span>
+        {subtitle && <span className="muted collapsible-subtitle">{subtitle}</span>}
       </button>
       {open && <div style={{ marginTop: 10 }}>{children}</div>}
+    </div>
+  );
+}
+
+// Mobile/tablet option chain: Robinhood-style full-width row list. A Call/Put
+// toggle picks one side at a time (rather than cramming both into a scrolling
+// table), each row stacks strike + breakeven info on the left with a pill
+// button showing live mid price on the right — tap the pill to open the buy
+// sheet, tap "+" to bump quantity by one contract before opening it.
+function MobileChainTable({ view, hasGreeks, pickOf, spot, setBuyTarget }) {
+  const [side, setSide] = useState("call");
+  const listRef = useRef(null);
+  const strikes = view.strikes;
+
+  useEffect(() => {
+    if (!listRef.current || !strikes.length) return;
+    let nearestIdx = 0;
+    if (spot != null) {
+      let best = Infinity;
+      strikes.forEach((s, i) => {
+        const d = Math.abs(s.strike - spot);
+        if (d < best) {
+          best = d;
+          nearestIdx = i;
+        }
+      });
+    }
+    const row = listRef.current.querySelector(`[data-strike-idx="${nearestIdx}"]`);
+    row?.scrollIntoView({ block: "center" });
+    // only re-center when the expiration (i.e. the strike set) or side changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strikes.length && strikes[0]?.strike, strikes.length && strikes[strikes.length - 1]?.strike, side]);
+
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div className="chain-side-toggle">
+        <button type="button" className={side === "call" ? "on" : ""} onClick={() => setSide("call")}>Call</button>
+        <button type="button" className={side === "put" ? "on" : ""} onClick={() => setSide("put")}>Put</button>
+      </div>
+      <div ref={listRef} className="chain-row-list">
+        {strikes.map((s, i) => {
+          const opt = s[side];
+          const mid = (opt.bid + opt.ask) / 2;
+          const pick = pickOf(s.strike) === side;
+          const breakeven = spot != null ? (side === "call" ? s.strike + mid : s.strike - mid) : null;
+          const toBreakevenPct = spot != null ? ((breakeven - spot) / spot) * 100 : null;
+          return (
+            <div key={s.strike} data-strike-idx={i} className={`chain-row ${pick ? "picked" : ""}`}>
+              <div className="chain-row-info">
+                <div className="chain-row-strike mono">${s.strike} {side === "call" ? "Call" : "Put"}</div>
+                {breakeven != null ? (
+                  <>
+                    <div className="chain-row-sub muted">Breakeven <span className="mono">{fmt$(breakeven)}</span></div>
+                    <div className="chain-row-sub muted">
+                      To breakeven <span className={`mono ${toBreakevenPct >= 0 ? "green" : "red"}`}>{toBreakevenPct >= 0 ? "+" : ""}{toBreakevenPct.toFixed(2)}%</span>
+                    </div>
+                  </>
+                ) : (
+                  hasGreeks && (
+                    <div className="chain-row-sub muted">
+                      IV <span className="mono">{opt?.iv != null ? (opt.iv * 100).toFixed(0) + "%" : "–"}</span>
+                      &nbsp;&middot;&nbsp;Δ <span className="mono">{opt?.delta != null ? opt.delta.toFixed(2) : "–"}</span>
+                    </div>
+                  )
+                )}
+              </div>
+              <button
+                type="button"
+                className={`chain-row-pill ${side}`}
+                onClick={() => setBuyTarget({ type: side, strike: s.strike, price: mid })}
+              >
+                <span className="mono">{fmt$(mid)}</span>
+                <span className="chain-row-pill-plus">+</span>
+              </button>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -139,6 +219,13 @@ function rangeDays(rangeKey) {
 
 const fmt$ = (n) => (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtPct = (n) => (n > 0 ? "+" : "") + n.toFixed(2) + "%";
+// "2026-07-31" -> "Jul 31" — the mobile expiration chip row is too narrow to show
+// full ISO dates without wrapping/overflowing; the full date is still in the title attr.
+const formatExpShort = (iso) => {
+  const [, m, d] = iso.split("-");
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${MONTHS[Number(m) - 1]} ${Number(d)}`;
+};
 
 // Data comes from a JSON snapshot the server fetches directly from Tradier's API and
 // writes to disk. This app never calls a market-data provider itself — it just polls
@@ -162,6 +249,53 @@ async function fetchSnapshot(symbol) {
   }
   return data;
 }
+
+const K_ACTIVE_TAB = "sim-active-tab"; // sessionStorage: survives a refresh, not a fresh tab/window
+
+// Inline SVG icons for the bottom tab bar — no icon library dependency, styled to
+// match the existing mono/line aesthetic (stroke-based, currentColor).
+function ChartTabIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+      <line x1="5" y1="18" x2="5" y2="10" />
+      <line x1="12" y1="18" x2="12" y2="6" />
+      <line x1="19" y1="18" x2="19" y2="13" />
+      <line x1="12" y1="6" x2="12" y2="3" opacity="0.6" />
+    </svg>
+  );
+}
+function TradeTabIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round">
+      <path d="M4 7l5-3 5 3v5l-5 3-5-3z" />
+      <path d="M10 12l5-3 5 3v5l-5 3-5-3z" />
+    </svg>
+  );
+}
+function SignalTabIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 14l4-4 3 3 6-8 5 6" />
+      <circle cx="21" cy="11" r="1.5" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+function NewsTabIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+      <line x1="4" y1="6" x2="20" y2="6" />
+      <line x1="4" y1="12" x2="20" y2="12" />
+      <line x1="4" y1="18" x2="14" y2="18" />
+    </svg>
+  );
+}
+
+const TABS = [
+  { key: "chart", label: "Chart", Icon: ChartTabIcon },
+  { key: "trade", label: "Trade", Icon: TradeTabIcon },
+  { key: "signal", label: "Signal", Icon: SignalTabIcon },
+  { key: "news", label: "News", Icon: NewsTabIcon },
+];
 
 export default function App() {
   const [symbol, setSymbol] = useState(null); // resolved from GET /api/symbol on mount
@@ -204,6 +338,21 @@ export default function App() {
   const symbolRef = useRef(symbol); // always-current symbol so in-flight pulls for a switched-away symbol get dropped
   symbolRef.current = symbol;
   const { status: refreshStatus, setStatus: setRefreshStatus, clear: clearRefreshStatus } = useRefreshStatusPoll(symbol, SERVER_URL);
+
+  // mobile shell state — see the design spec (§4) for the 767px/1023px breakpoints
+  const isMobile = useMediaQuery("(max-width: 767px)");
+  const isTablet = useMediaQuery("(min-width: 768px) and (max-width: 1023px)");
+  const [activeTab, setActiveTab] = useState(() => {
+    const stored = typeof sessionStorage !== "undefined" ? sessionStorage.getItem(K_ACTIVE_TAB) : null;
+    return TABS.some((t) => t.key === stored) ? stored : "chart";
+  });
+  const [mSearchOpen, setMSearchOpen] = useState(false); // header ticker tap → slide-down search panel
+  const [mAccountOpen, setMAccountOpen] = useState(false); // header account icon → account drawer sheet
+  const [mChartSettingsOpen, setMChartSettingsOpen] = useState(false); // "..." button → chart settings sheet
+
+  useEffect(() => {
+    sessionStorage.setItem(K_ACTIVE_TAB, activeTab);
+  }, [activeTab]);
 
   // resolve the server-side active symbol once on mount — stays null (no symbol
   // selected yet) until the server has one or the user searches and hits "Go"
@@ -615,89 +764,668 @@ export default function App() {
   const buyTargetDisplay = useLingering(buyTarget);
 
   return (
-    <div className="wrap">
+    <div className={`wrap ${isMobile ? "mobile-shell" : ""}`}>
       <style>{`
-        .wrap { background:#0B0D0F; color:#E7E9EA; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; min-height:100vh; padding:20px; box-sizing:border-box; }
-        .mono { font-family: ui-monospace, "SF Mono", "IBM Plex Mono", Menlo, monospace; }
-        .muted { color:#8A9099; }
-        .green { color:#3DDC84; }
-        .red { color:#FF5C5C; }
-        .amber { color:#E8A33D; }
-        .card { background:#14171A; border:1px solid #22262B; border-radius:10px; padding:16px; }
+        :root {
+          /* ---- Color: backgrounds ---- */
+          --bg-page: #0B0D0F;
+          --bg-card: #14171A;
+          --bg-pane: #101316;
+          --bg-input: #1B1F24;
+          --bg-log: #0F1114;
+
+          /* ---- Color: borders ---- */
+          --border-default: #22262B;
+          --border-strong: #2A2F35;
+          --border-hover: #3A3F46;
+          --border-pane: #1E2227;
+          --border-hairline: #1A1D21;
+
+          /* ---- Color: text ---- */
+          --text-primary: #E7E9EA;
+          --text-secondary: #C9CDD1;
+          --text-muted: #8A9099;
+          --text-disabled: #565C63;
+
+          /* ---- Color: semantic ---- */
+          --green: #3DDC84;
+          --red: #FF5C5C;
+          --amber: #E8A33D;
+          --accent-blue: #4C8DFF;
+
+          --buy-bg: #123B26;
+          --buy-border: #1E6B3F;
+          --buy-text: #3DDC84;
+          --sell-bg: #3B1717;
+          --sell-border: #6B1E1E;
+          --sell-text: #FF5C5C;
+          --err-text: #FF9B9B;
+
+          /* ---- Typography ---- */
+          --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+          --font-mono: ui-monospace, "SF Mono", "IBM Plex Mono", Menlo, monospace;
+
+          --text-price-lg: 40px;
+          --text-price-lg-mobile: 28px;
+          --text-section-title: 18px;
+          --text-body: 13px;
+          --text-label: 12px;
+          --text-chip: 11px;
+          --text-micro: 10px;
+
+          /* ---- Spacing scale (4px base) ---- */
+          --space-1: 4px;
+          --space-2: 8px;
+          --space-3: 12px;
+          --space-4: 16px;
+          --space-5: 20px;
+          --space-6: 24px;
+          --space-8: 32px;
+
+          /* ---- Radius scale ---- */
+          --radius-sm: 6px;
+          --radius-md: 8px;
+          --radius-lg: 10px;
+          --radius-pill: 99px;
+
+          /* ---- Layout / mobile chrome ---- */
+          --header-height: 56px;
+          --tabbar-height: 56px;
+          --safe-top: env(safe-area-inset-top, 0px);
+          --safe-bottom: env(safe-area-inset-bottom, 0px);
+          --tabbar-total-height: calc(var(--tabbar-height) + var(--safe-bottom));
+          --content-bottom-clearance: calc(var(--tabbar-total-height) + var(--space-3));
+          --tap-target-min: 44px;
+
+          /* ---- Z-index scale ---- */
+          --z-base: 0;
+          --z-sticky-column: 1;
+          --z-chart-tooltip: 5;
+          --z-sticky-header: 10;
+          --z-tabbar: 20;
+          --z-banner: 25;
+          --z-sheet-backdrop: 40;
+          --z-sheet: 41;
+          --z-modal-backdrop: 50;
+          --z-modal: 51;
+          --z-toast: 60;
+        }
+        .wrap { background:var(--bg-page); color:var(--text-primary); font-family: var(--font-sans); min-height:100vh; padding:20px; box-sizing:border-box; }
+        .mono { font-family: var(--font-mono); }
+        .muted { color:var(--text-muted); }
+        .green { color:var(--green); }
+        .red { color:var(--red); }
+        .amber { color:var(--amber); }
+        .card { background:var(--bg-card); border:1px solid var(--border-default); border-radius:var(--radius-lg); padding:16px; }
         .module { margin-bottom:24px; }
         .module:last-child { margin-bottom:0; }
         .module-header { margin-bottom:10px; }
         .row { display:flex; align-items:center; gap:10px; }
         .header { display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:16px; margin-bottom:18px; }
-        .dot { width:8px; height:8px; border-radius:50%; background:#3DDC84; box-shadow:0 0 8px #3DDC84; animation: dot-pulse 2s ease-in-out infinite; }
-        .dot.off { background:#565C63; box-shadow:none; animation:none; }
+        .dot { width:8px; height:8px; border-radius:50%; background:var(--green); box-shadow:0 0 8px var(--green); animation: dot-pulse 2s ease-in-out infinite; }
+        .dot.off { background:var(--text-disabled); box-shadow:none; animation:none; }
         @keyframes dot-pulse { 0%, 100% { opacity:1; } 50% { opacity:.45; } }
-        .price-big { font-size:40px; font-weight:600; letter-spacing:-0.5px; transition: color .5s ease; }
-        .price-big.flash-up { color:#3DDC84; transition: color 60ms ease; }
-        .price-big.flash-down { color:#FF5C5C; transition: color 60ms ease; }
+        .price-big { font-size:var(--text-price-lg); font-weight:600; letter-spacing:-0.5px; transition: color .5s ease; }
+        .price-big.flash-up { color:var(--green); transition: color 60ms ease; }
+        .price-big.flash-down { color:var(--red); transition: color 60ms ease; }
         .grid { display:grid; grid-template-columns: 1.1fr 1fr; gap:16px; }
-        @media (max-width:860px) { .grid { grid-template-columns: 1fr; } }
+        @media (max-width:1023px) { .grid { grid-template-columns: 1fr; } }
+
+        /* chain (mobile/tablet): Robinhood-style call/put toggle + full-width row list */
+        .chain-side-toggle { display:flex; gap:8px; margin-bottom:10px; }
+        .chain-side-toggle button { flex:1; padding:10px; border-radius:var(--radius-pill); background:var(--bg-card); border:1px solid var(--border-default); color:var(--text-muted); font-weight:600; font-size:14px; }
+        .chain-side-toggle button.on { background:var(--bg-pane); border-color:var(--accent-blue); color:var(--text-primary); }
+        .chain-row-list { max-height: 60vh; overflow-y:auto; -webkit-overflow-scrolling:touch; }
+        .chain-row { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:14px 4px; border-bottom:1px solid var(--border-hairline); min-height:64px; box-sizing:border-box; }
+        .chain-row.picked { background:rgba(76,141,255,.07); margin:0 -8px; padding-left:12px; padding-right:12px; border-radius:var(--radius-sm); }
+        .chain-row-info { display:flex; flex-direction:column; gap:3px; min-width:0; }
+        .chain-row-strike { font-size:15px; font-weight:600; }
+        .chain-row-sub { font-size:12px; }
+        .chain-row-pill { flex:0 0 auto; display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:var(--radius-pill); background:transparent; border:1.5px solid var(--accent-blue); color:var(--accent-blue); font-weight:600; font-size:15px; min-height:var(--tap-target-min); }
+        .chain-row-pill.put { border-color:var(--sell-border); color:var(--sell-text); }
+        .chain-row-sub .green { color:var(--accent-blue); }
+        .chain-row-pill-plus { font-size:16px; font-weight:400; opacity:.8; padding-left:8px; border-left:1px solid currentColor; }
+        .grid-stretch { align-items:stretch; }
+        .grid-stretch > div { display:flex; flex-direction:column; }
+        .grid-stretch > div > .card { flex:1; display:flex; flex-direction:column; }
+        .grid-stretch .trade-log { flex:1; }
         table { width:100%; border-collapse:collapse; font-size:13px; }
-        th { text-align:right; color:#8A9099; font-weight:500; padding:6px 8px; border-bottom:1px solid #22262B; }
+        th { text-align:right; color:var(--text-muted); font-weight:500; padding:6px 8px; border-bottom:1px solid var(--border-default); }
         th:first-child, td:first-child { text-align:left; }
-        td { text-align:right; padding:6px 8px; border-bottom:1px solid #1A1D21; }
-        .strike-cell { color:#E8A33D; font-weight:600; }
-        button { font-family:inherit; cursor:pointer; border-radius:6px; border:1px solid #2A2F35; background:#1B1F24; color:#E7E9EA; padding:5px 10px; font-size:12px; }
-        button:hover { border-color:#3A3F46; }
-        button.buy { background:#123B26; border-color:#1E6B3F; color:#3DDC84; }
-        button.sell { background:#3B1717; border-color:#6B1E1E; color:#FF5C5C; }
-        button.ghost { background:transparent; }
-        select, input[type=number], input[type=text] { background:#1B1F24; color:#E7E9EA; border:1px solid #2A2F35; border-radius:6px; padding:5px 8px; font-family:inherit; font-size:13px; }
+        td { text-align:right; padding:6px 8px; border-bottom:1px solid var(--border-hairline); }
+        .strike-cell { color:var(--amber); font-weight:600; }
+        button, a.ghost { font-family:inherit; cursor:pointer; border-radius:var(--radius-sm); border:1px solid var(--border-strong); background:var(--bg-input); color:var(--text-primary); padding:5px 10px; font-size:12px; }
+        button:hover, a.ghost:hover { border-color:var(--border-hover); }
+        button.buy { background:var(--buy-bg); border-color:var(--buy-border); color:var(--buy-text); }
+        button.sell { background:var(--sell-bg); border-color:var(--sell-border); color:var(--sell-text); }
+        button.ghost, a.ghost { background:transparent; }
+        a.ghost { text-decoration:none; display:inline-flex; align-items:center; line-height:1.4; }
+        button.small, a.small { padding:3px 8px; font-size:11px; }
+        select, input[type=number], input[type=text] { background:var(--bg-input); color:var(--text-primary); border:1px solid var(--border-strong); border-radius:var(--radius-sm); padding:5px 8px; font-family:inherit; font-size:13px; }
         .search-input { width:90px; text-transform:uppercase; }
-        .search-input::placeholder { text-transform:none; color:#565C63; }
-        .section-title { font-size:18px; text-transform:uppercase; letter-spacing:1px; color:#8A9099; margin-bottom:10px; font-weight: 600; }
+        .search-input::placeholder { text-transform:none; color:var(--text-disabled); }
+        .section-title { font-size:var(--text-section-title); text-transform:uppercase; letter-spacing:1px; color:var(--text-muted); margin-bottom:10px; font-weight: 600; }
+        .subsection-title { font-size:var(--text-label); text-transform:uppercase; letter-spacing:.6px; color:var(--text-muted); font-weight:600; padding-top:14px; margin-top:14px; border-top:1px solid var(--border-pane); }
         .chip-row { display:flex; flex-wrap:wrap; align-items:center; gap:4px; }
-        .chip { font-size:11px; line-height:1.4; padding:3px 8px; border-radius:99px; border:1px solid #2A2F35; background:transparent; letter-spacing:.3px; }
+        .chip { font-size:var(--text-chip); line-height:1.4; padding:3px 8px; border-radius:var(--radius-pill); border:1px solid var(--border-strong); background:transparent; letter-spacing:.3px; }
         .chip:hover:not(:disabled) { filter:brightness(1.2); }
-        .chip.on { color:#0B0D0F; font-weight:600; }
+        .chip.on { color:var(--bg-page); font-weight:600; }
         .chip:disabled { opacity:.35; cursor:default; filter:none; }
-        .chip-sep { width:1px; align-self:stretch; background:#2A2F35; margin:2px 4px; }
+        .chip-sep { width:1px; align-self:stretch; background:var(--border-strong); margin:2px 4px; }
+        .range-chip { font-size:var(--text-chip); line-height:1.4; padding:4px 8px; margin:0 2px; border:none; background:transparent; color:var(--text-muted); letter-spacing:.3px; border-radius:var(--radius-sm); }
+        .range-chip:hover:not(:disabled) { color:var(--text-primary); }
+        .range-chip.on { color:var(--accent-blue); font-weight:600; }
+        .range-chip:disabled { opacity:.35; cursor:default; }
         .chip-wrap { display:inline-flex; align-items:center; gap:2px; }
-        .chip-help { width:15px; height:15px; padding:0; border-radius:50%; border:1px solid #2A2F35; background:transparent; color:#8A9099; font-size:9px; line-height:1; }
-        .chip-help:hover { color:#E7E9EA; border-color:#3A3F46; }
-        .iv-badge { font-size:11px; color:#8A9099; font-family:ui-monospace, monospace; padding:3px 8px; border:1px solid #2A2F35; border-radius:99px; }
+        .chip-help { width:15px; height:15px; padding:0; border-radius:50%; border:1px solid var(--border-strong); background:transparent; color:var(--text-muted); font-size:9px; line-height:1; }
+        .chip-help:hover { color:var(--text-primary); border-color:var(--border-hover); }
+        .iv-badge { font-size:var(--text-chip); color:var(--text-muted); font-family:var(--font-mono); padding:3px 8px; border:1px solid var(--border-strong); border-radius:var(--radius-pill); }
+        .indicator-menu { position:relative; }
+        .indicator-menu-btn { display:inline-flex; align-items:center; gap:6px; }
+        .indicator-menu-btn.on { border-color:var(--accent-blue); color:var(--text-primary); }
+        .indicator-menu-count { display:inline-flex; align-items:center; justify-content:center; min-width:16px; height:16px; padding:0 4px; border-radius:var(--radius-pill); background:var(--accent-blue); color:#fff; font-size:10px; font-weight:600; }
+        .indicator-menu-caret { font-size:9px; opacity:.7; }
+        .indicator-menu-panel { position:absolute; top:calc(100% + 6px); left:0; z-index:var(--z-sticky-header); width:min(420px, 80vw); background:var(--bg-card); border:1px solid var(--border-default); border-radius:var(--radius-lg); padding:14px; box-shadow:0 12px 32px rgba(0,0,0,.45); }
+        .indicator-menu-group + .indicator-menu-group { margin-top:12px; }
+        .indicator-menu-group-title { font-size:var(--text-label); text-transform:uppercase; letter-spacing:.6px; color:var(--text-muted); font-weight:600; margin-bottom:6px; }
+        .indicator-menu-panel .chip-row { row-gap:6px; }
         .pane-stack { display:flex; flex-direction:column; gap:14px; margin-top:10px; }
-        .pane-card { background:#101316; border:1px solid #1E2227; border-radius:8px; padding:10px 0 8px; overflow:hidden; transition:opacity .15s, border-color .15s; }
+        .pane-card { background:var(--bg-pane); border:1px solid var(--border-pane); border-radius:var(--radius-md); padding:10px 0 8px; overflow:hidden; transition:opacity .15s, border-color .15s, transform .15s, box-shadow .15s; }
         .pane-card.dragging { opacity:.35; }
-        .pane-card.drag-over { border-color:#4C8DFF; }
+        .pane-card.drag-over { border-color:var(--accent-blue); }
         .pane-card-header { display:flex; align-items:center; gap:6px; padding:0 10px 8px; }
-        .pane-card-title { font-size:11px; letter-spacing:.6px; text-transform:uppercase; color:#8A9099; font-family: ui-monospace, "SF Mono", "IBM Plex Mono", Menlo, monospace; }
-        .drag-handle { cursor:grab; color:#565C63; font-size:13px; line-height:1; padding:2px; user-select:none; }
+        .pane-card-header.dragging { transform:scale(1.02); box-shadow:0 6px 18px rgba(0,0,0,.4); }
+        .pane-card-title { font-size:11px; letter-spacing:.6px; text-transform:uppercase; color:var(--text-muted); font-family: var(--font-mono); }
+        .drag-handle { cursor:grab; color:var(--text-disabled); font-size:13px; line-height:1; padding:2px; user-select:none; touch-action:none; }
         .drag-handle:active { cursor:grabbing; }
-        .chart-tooltip { background:#14171A; border:1px solid #22262B; border-radius:8px; padding:8px 10px; font-size:11px; line-height:1.6; box-shadow:0 4px 14px rgba(0,0,0,.45); min-width:150px; }
+        .drag-handle-pulse, .reorder-pulse .drag-handle { animation: reorder-flash .15s ease-out; }
+        @keyframes reorder-flash { 0% { box-shadow:0 0 0 0 var(--accent-blue); } 100% { box-shadow:0 0 0 4px rgba(76,141,255,0); } }
+        .chart-tooltip { background:var(--bg-card); border:1px solid var(--border-default); border-radius:var(--radius-md); padding:8px 10px; font-size:11px; line-height:1.6; box-shadow:0 4px 14px rgba(0,0,0,.45); min-width:150px; }
         .chart-tooltip-date { font-size:10px; margin-bottom:4px; }
         .chart-tooltip-row { display:flex; gap:6px; flex-wrap:wrap; }
-        .chart-tooltip-indicators { margin-top:6px; padding-top:6px; border-top:1px solid #1E2227; display:flex; flex-direction:column; gap:2px; }
-        .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.6); display:flex; align-items:center; justify-content:center; z-index:10; }
-        .modal { background:#14171A; border:1px solid #2A2F35; border-radius:10px; padding:20px; width:280px; }
+        .chart-tooltip-indicators { margin-top:6px; padding-top:6px; border-top:1px solid var(--border-pane); display:flex; flex-direction:column; gap:2px; }
+        .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.6); display:flex; align-items:center; justify-content:center; z-index:var(--z-modal-backdrop); }
+        .modal { background:var(--bg-card); border:1px solid var(--border-strong); border-radius:var(--radius-lg); padding:20px; width:280px; }
         .modal.help { width:420px; max-width:92vw; max-height:82vh; overflow-y:auto; }
-        .modal.help p { font-size:13px; line-height:1.6; color:#C9CDD1; margin:4px 0 12px; }
-        .err { background:#3B1717; border:1px solid #6B1E1E; color:#FF9B9B; padding:8px 12px; border-radius:6px; font-size:13px; margin-bottom:14px; }
+        .modal.help p { font-size:13px; line-height:1.6; color:var(--text-secondary); margin:4px 0 12px; }
+        .err { background:var(--sell-bg); border:1px solid var(--sell-border); color:var(--err-text); padding:8px 12px; border-radius:var(--radius-sm); font-size:13px; margin-bottom:14px; }
         .refresh-banner { margin-bottom: 16px; padding: 12px 16px; }
-        .refresh-banner-error { border-color:#6B1E1E; }
-        .spinner { width:12px; height:12px; border-radius:50%; border:2px solid #2A2F35; border-top-color:#4C8DFF; animation: spin .7s linear infinite; }
+        .refresh-banner-error { border-color:var(--sell-border); }
+        .spinner { width:12px; height:12px; border-radius:50%; border:2px solid var(--border-strong); border-top-color:var(--accent-blue); animation: spin .7s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
-        .progress-track { height:6px; border-radius:99px; background:#1B1F24; overflow:hidden; }
-        .progress-fill { height:100%; background:#4C8DFF; transition: width .3s ease; }
-        .refresh-log { max-height:140px; overflow-y:auto; background:#0F1114; border:1px solid #1E2227; border-radius:6px; padding:8px 10px; font-size:11px; line-height:1.7; }
+        .progress-track { height:6px; border-radius:var(--radius-pill); background:var(--bg-input); overflow:hidden; }
+        .progress-fill { height:100%; background:var(--accent-blue); transition: width .3s ease; }
+        .refresh-log { max-height:140px; overflow-y:auto; background:var(--bg-log); border:1px solid var(--border-pane); border-radius:var(--radius-sm); padding:8px 10px; font-size:11px; line-height:1.7; }
         .refresh-log-line { white-space:pre-wrap; word-break:break-word; }
-        .summary p { margin:4px 0 0; font-size:13px; line-height:1.6; color:#C9CDD1; }
-        .summary .sub { font-weight:600; color:#E7E9EA; font-size:13px; margin-top:12px; }
+        .summary p { margin:4px 0 0; font-size:13px; line-height:1.6; color:var(--text-secondary); }
+        .summary .sub { font-weight:600; color:var(--text-primary); font-size:13px; margin-top:12px; }
         .trade-log { max-height:220px; overflow-y:auto; }
-        .collapsible-header { display:flex; align-items:center; gap:8px; width:100%; justify-content:flex-start; background:transparent; border:none; padding:6px 0; }
-        .collapsible-header:hover .section-title { color:#C9CDD1; }
-        .collapsible-caret { color:#8A9099; font-size:11px; width:10px; }
+        .news-log-full { max-height:none; overflow-y:visible; }
+        /* compact NewsPanel: no card shell, stacked header instead of one crowded row */
+        .news-compact-header { display:flex; flex-direction:column; gap:6px; margin-bottom:10px; }
+        .news-compact-title { font-size:14px; text-transform:uppercase; letter-spacing:.6px; color:var(--text-muted); font-weight:600; }
+        .news-compact-header .row { flex-wrap:wrap; gap:8px; }
+        .collapsible-header { display:flex; align-items:center; flex-wrap:wrap; row-gap:2px; gap:8px; width:100%; justify-content:flex-start; background:var(--bg-card); border:1px solid var(--border-default); border-radius:var(--radius-lg); padding:12px 16px; }
+        .collapsible-header:hover { border-color:var(--border-hover); }
+        .collapsible-header:hover .collapsible-title { color:var(--text-secondary); }
+        .collapsible-caret { color:var(--text-muted); font-size:11px; width:10px; }
+        .collapsible-title { font-size:14px; text-transform:uppercase; letter-spacing:.6px; color:var(--text-muted); font-weight:600; }
+        .collapsible-subtitle { font-size:12px; font-weight:400; flex-basis:100%; margin-left:18px; }
         @media (prefers-reduced-motion: reduce) {
           .dot { animation:none; }
           .price-big, .price-big.flash-up, .price-big.flash-down { transition:none; }
         }
+
+        /* =====================================================================
+           Mobile shell (<=767px) + tablet band (768-1023px) — additive layer.
+           Desktop (>=1024px) renders none of this; the mobile shell components
+           are simply not mounted above 767px (see isMobile in App()).
+           ===================================================================== */
+
+        /* ---- sheet variant of Modal (mobile bottom sheet) ---- */
+        .modal-sheet, .modal.modal-sheet, .modal.help.modal-sheet {
+          position: fixed; left: 5px; right: 5px; bottom: 0; width: auto; max-width: none;
+          border-radius: 16px 16px 0 0;
+          max-height: 85vh; overflow-y: auto;
+          padding-top: 22px;
+          padding-bottom: calc(20px + var(--safe-bottom));
+          box-sizing: border-box;
+        }
+        .sheet-handle { position:absolute; top:8px; left:50%; transform:translateX(-50%); width:36px; height:4px; border-radius:var(--radius-pill); background:var(--border-strong); }
+        .modal-bg:has(.modal-sheet) { align-items: flex-end; }
+
+        @media (max-width: 767px) {
+          .desktop-only { display: none !important; }
+          body { padding-bottom: 0; }
+          .wrap.mobile-shell { padding: 0 var(--space-3) var(--content-bottom-clearance); }
+
+          .summary:not(.card) p { margin:4px 0 16px; }
+          .summary:not(.card) .sub { font-size:14px; }
+
+          /* sticky compact header */
+          .m-header {
+            position: sticky; top: 0; z-index: var(--z-sticky-header);
+            display: flex; align-items: center; justify-content: space-between;
+            height: var(--header-height);
+            margin: 0 calc(-1 * var(--space-3)) 0;
+            padding: 0 var(--space-3);
+            background: var(--bg-page);
+            border-bottom: 1px solid var(--border-hairline);
+          }
+          .m-header-left { display:flex; align-items:center; gap:8px; min-height:44px; padding:4px 2px; }
+          .m-ticker { font-size:15px; font-weight:700; }
+          .m-chg-pill { font-size:10px; font-weight:600; padding:2px 6px; border-radius:var(--radius-pill); }
+          .m-chg-pill.up { background:rgba(61,220,132,.15); color:var(--green); }
+          .m-chg-pill.down { background:rgba(255,92,92,.15); color:var(--red); }
+          .m-price { font-size:16px; font-family:var(--font-mono); font-weight:600; transition:color .5s ease; }
+          .m-price.flash-up { color:var(--green); transition:color 60ms ease; }
+          .m-price.flash-down { color:var(--red); transition:color 60ms ease; }
+          .m-account-btn { width:44px; height:44px; display:flex; align-items:center; justify-content:center; background:transparent; border:none; color:var(--text-muted); }
+
+          /* search slide-down panel */
+          .m-search-panel { padding: var(--space-3); background:var(--bg-card); border-bottom:1px solid var(--border-hairline); margin: 0 calc(-1 * var(--space-3)); }
+
+          /* compact refresh strip */
+          .refresh-strip { display:flex; align-items:center; gap:8px; width:100%; height:28px; padding:0 var(--space-3); font-size:11px; border-radius:0; border:none; border-bottom:1px solid var(--border-hairline); background:var(--bg-card); margin: 0 calc(-1 * var(--space-3)); box-sizing:border-box; z-index: var(--z-banner); }
+          .refresh-strip-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+          /* bottom tab bar */
+          .m-tabbar {
+            position: fixed; left: 0; right: 0; bottom: 0; z-index: var(--z-tabbar);
+            display: flex;
+            height: var(--tabbar-total-height);
+            padding-bottom: var(--safe-bottom);
+            background: var(--bg-card);
+            border-top: 1px solid var(--border-default);
+          }
+          .m-tab {
+            flex: 1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px;
+            background:transparent; border:none; border-radius:0; color:var(--text-muted);
+            height: var(--tabbar-height); padding: 0;
+            position: relative;
+          }
+          .m-tab svg { width:22px; height:22px; }
+          .m-tab-label { font-size:10px; text-transform:uppercase; letter-spacing:.4px; }
+          .m-tab.active { color: var(--accent-blue); }
+          .m-tab.active::before { content:""; position:absolute; top:0; left:20%; right:20%; height:2px; background:var(--accent-blue); border-radius:var(--radius-pill); }
+
+          /* tab content */
+          .m-tab-content { padding-top: var(--space-3); }
+
+          /* chart tab */
+          .m-chart-card { position: relative; }
+          .m-chart-settings-btn { position:absolute; top:8px; right:8px; z-index:2; width:32px; height:32px; border-radius:var(--radius-md); display:flex; align-items:center; justify-content:center; padding:0; }
+
+          /* trade tab: expiration chip row scroll-snap */
+          .m-exp-row { display:flex; gap:6px; overflow-x:auto; -webkit-overflow-scrolling:touch; scroll-snap-type:x proximity; padding-bottom:4px; }
+          .m-exp-row .range-chip { scroll-snap-align:start; flex:0 0 auto; }
+          .m-exp-chip { font-size:12px; }
+
+          /* position cards (mobile "Open positions") */
+          .m-position-card { background:var(--bg-card); border:1px solid var(--border-default); border-radius:var(--radius-md); padding:10px 12px; margin-bottom:8px; }
+          .m-position-card:last-child { margin-bottom:0; }
+          .m-position-line1 { font-size:13px; font-family:var(--font-mono); }
+          .m-position-line2 { font-size:12px; color:var(--text-muted); margin-top:2px; }
+          .m-position-pnl { font-size:15px; font-weight:600; font-family:var(--font-mono); }
+          .m-position-pnl.green { color:var(--accent-blue); }
+          .m-buy-label { color:var(--accent-blue); }
+          .m-position-row { display:flex; justify-content:space-between; align-items:center; margin-top:6px; }
+
+          /* accordion group in Signal tab */
+          .m-accordion-group .module { margin-bottom:10px; }
+
+          /* touch target padding — visible size unchanged, tap area expanded */
+          .chip { min-height: var(--tap-target-min); padding: 8px 12px; display:inline-flex; align-items:center; box-sizing:border-box; }
+          .chip-help { position:relative; }
+          .chip-help::after { content:""; position:absolute; inset:-8.5px; }
+          .m-tab, .m-account-btn, .m-chart-settings-btn { min-width: var(--tap-target-min); min-height: var(--tap-target-min); }
+        }
+
+        @media (min-width: 768px) and (max-width: 1023px) {
+          .chain-row-list { max-height: 70vh; }
+        }
       `}</style>
 
+      {isMobile ? (
+        <>
+          <div className="m-header">
+            <button
+              type="button"
+              className="m-header-left"
+              style={{ background: "transparent", border: "none", padding: "4px 2px" }}
+              onClick={() => setMSearchOpen((o) => !o)}
+              aria-expanded={mSearchOpen}
+              title="Search symbol"
+            >
+              <span className="m-ticker">{symbol ?? "…"}</span>
+              {quote && (
+                <span className={`m-chg-pill ${up ? "up" : "down"}`}>{fmtPct(quote.changePct)}</span>
+              )}
+            </button>
+            <span className={`m-price mono ${priceFlash === "up" ? "flash-up" : priceFlash === "down" ? "flash-down" : ""}`}>
+              {quote ? fmt$(quote.price) : "—"}
+            </span>
+            <button
+              type="button"
+              className="m-account-btn"
+              onClick={() => setMAccountOpen(true)}
+              title="Account"
+              aria-label="Account"
+            >
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="8" r="3.5" />
+                <path d="M4.5 20c1.4-3.6 4.4-5.5 7.5-5.5s6.1 1.9 7.5 5.5" />
+              </svg>
+            </button>
+          </div>
+
+          {mSearchOpen && (
+            <div className="m-search-panel">
+              <form
+                className="row"
+                style={{ gap: 6 }}
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const sym = String(searchInput || "").trim().toUpperCase();
+                  selectSymbol(searchInput);
+                  if (SYMBOL_RE.test(sym)) triggerRefresh(sym);
+                  setMSearchOpen(false);
+                }}
+              >
+                <input
+                  className="search-input"
+                  type="text"
+                  placeholder="Symbol…"
+                  maxLength={8}
+                  value={searchInput}
+                  onChange={(e) => {
+                    setSearchInput(e.target.value);
+                    if (searchError) setSearchError(null);
+                  }}
+                  style={{ flex: 1 }}
+                  autoFocus
+                />
+                <button type="submit" className="ghost" title="Fetch fresh market data for this symbol">Go</button>
+              </form>
+              {searchError && <div style={{ color: "#FF9B9B", fontSize: 12, marginTop: 4 }}>{searchError}</div>}
+              {recentSymbols.length > 0 && (
+                <div className="chip-row" style={{ marginTop: 10 }}>
+                  {recentSymbols.map((s) => (
+                    <button
+                      key={s}
+                      className={`chip ${s === symbol ? "on" : ""}`}
+                      style={s === symbol ? { background: "#4C8DFF", borderColor: "#4C8DFF" } : undefined}
+                      onClick={() => {
+                        selectSymbol(s);
+                        setMSearchOpen(false);
+                      }}
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {refreshStatus && <RefreshProgressBanner status={refreshStatus} onDismiss={clearRefreshStatus} compact />}
+
+          <div className="m-tab-content">
+            {!symbol && (
+              <div className="card" style={{ marginTop: 12, textAlign: "center", padding: 40 }}>
+                <div className="section-title" style={{ marginBottom: 6 }}>No symbol selected</div>
+                <div className="muted" style={{ fontSize: 13 }}>
+                  Tap the ticker above to search for a stock or ETF and start paper trading.
+                </div>
+              </div>
+            )}
+
+            {symbol && error && <div className="err" style={{ marginTop: 12 }}>{error}</div>}
+
+            {symbol && noData && (
+              <div className="card" style={{ marginTop: 12, textAlign: "center", padding: 28 }}>
+                <div className="section-title" style={{ marginBottom: 6 }}>No data for {symbol} yet</div>
+                <div className="muted" style={{ fontSize: 13 }}>
+                  Tap the ticker above and hit &ldquo;Go&rdquo; to fetch live data for {symbol}.
+                </div>
+              </div>
+            )}
+
+            {symbol && !noData && activeTab === "chart" && (
+              <>
+                <div className="chip-row" style={{ justifyContent: "space-between" }}>
+                  {CANDLE_RANGES.map((r) => (
+                    <button
+                      key={r.key}
+                      className={`range-chip ${r.key === candleRange ? "on" : ""}`}
+                      onClick={() => setCandleRange(r.key)}
+                    >
+                      {r.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="m-chart-card" style={{ marginTop: 10 }}>
+                  <button
+                    type="button"
+                    className="ghost m-chart-settings-btn"
+                    onClick={() => setMChartSettingsOpen(true)}
+                    title="Chart settings"
+                    aria-label="Chart settings"
+                  >
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                      <circle cx="5" cy="12" r="1.5" fill="currentColor" stroke="none" />
+                      <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
+                      <circle cx="19" cy="12" r="1.5" fill="currentColor" stroke="none" />
+                    </svg>
+                  </button>
+                  {chartBars.length ? (
+                    <Candlestick bars={chartBars} height={280} series={chartSeries} active={activeInd} interval={candleInterval} isMobile />
+                  ) : (
+                    <div className="muted" style={{ padding: 20, textAlign: "center" }}>
+                      No {candleInterval} candles yet for {symbol} — pull to refresh.
+                    </div>
+                  )}
+                </div>
+                <div style={{ marginTop: 12 }}>
+                  <SummaryPanel quote={quote} greeks={greeksData} signal={signalData} symbol={symbol} isMobile />
+                </div>
+              </>
+            )}
+
+            {symbol && !noData && activeTab === "trade" && (() => {
+              const view = greeksData?.chains?.[selectedExp] ?? chain;
+              const hasGreeks = view?.strikes?.some((s) => s.call?.delta != null || s.put?.delta != null);
+              const preview = greeksData?.preview?.expiration === selectedExp ? greeksData.preview : null;
+              const pickOf = (strike) =>
+                preview?.call?.strike === strike ? "call" : preview?.put?.strike === strike ? "put" : null;
+              return (
+                <>
+                  <div className="m-exp-row">
+                    {expirations.map((d) => (
+                      <button
+                        key={d}
+                        className={`range-chip m-exp-chip ${d === selectedExp ? "on" : ""}`}
+                        title={d}
+                        onClick={() => {
+                          setSelectedExp(d);
+                          selectedExpRef.current = d;
+                          if (chainsRef.current[d]) setChain(chainsRef.current[d]);
+                          fetchChain(d);
+                        }}
+                      >
+                        {formatExpShort(d)}
+                      </button>
+                    ))}
+                  </div>
+
+                  {chainLoading && <div className="muted" style={{ marginTop: 10 }}>Loading chain…</div>}
+                  {!chainLoading && selectedExp && !chainsRef.current[selectedExp] && (
+                    <div className="muted" style={{ marginTop: 10, fontSize: 12 }}>
+                      No data yet for {selectedExp}.{chain ? " Showing last loaded expiration below." : " Tap the ticker and hit “Go” to refresh."}
+                    </div>
+                  )}
+
+                  {view && !chainLoading && (
+                    <MobileChainTable view={view} hasGreeks={hasGreeks} pickOf={pickOf} preview={preview} spot={quote?.price} setBuyTarget={setBuyTarget} />
+                  )}
+
+                  <div className="module-header" style={{ marginTop: 20 }}><div className="section-title" style={{ margin: 0 }}>Open positions</div></div>
+                  {positions.length === 0 && <div className="muted">No open positions.</div>}
+                  {positions.map((p) => {
+                    const mark = p.mark ?? p.entryPrice;
+                    const pnl = (mark - p.entryPrice) * 100 * p.qty;
+                    return (
+                      <div key={p.id} className="m-position-card">
+                        <div className="m-position-line1">{p.symbol ?? symbol} {p.strike}{p.type === "call" ? "C" : "P"} {p.expiration}</div>
+                        <div className="m-position-line2">{p.qty}x @ {p.entryPrice.toFixed(2)}</div>
+                        <div className="m-position-row">
+                          <span className={`m-position-pnl ${pnl >= 0 ? "green" : "red"}`}>{fmt$(pnl)}</span>
+                          <button className="ghost" onClick={() => closePosition(p)}>Close</button>
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  <div className="subsection-title">Trade log</div>
+                  <div className="trade-log">
+                    {trades.length === 0 && <div className="muted">No trades yet.</div>}
+                    {trades.map((t) => (
+                      <div key={`${t.id}-${t.action}`} className="mono" style={{ fontSize: 12, padding: "4px 0", borderBottom: "1px solid #1A1D21" }}>
+                        <span className={t.action === "BUY" ? "m-buy-label" : "red"}>{t.action}</span> {t.qty}x {t.symbol ?? symbol} {t.strike}{t.type === "call" ? "C" : "P"} {t.expiration} @ {(t.action === "BUY" ? t.entryPrice : t.closePrice).toFixed(2)}
+                        <span className="muted"> &middot; {new Date(t.at).toLocaleTimeString()}</span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              );
+            })()}
+
+            {symbol && !noData && activeTab === "signal" && (
+              <>
+                <AutopilotPanel symbol={symbol} />
+                <div style={{ marginTop: 20 }}>
+                  <IndicatorsPanel data={indicators} error={indError} secondsLeft={polling ? secondsLeft : null} status={indStatus} active={activeInd} />
+                </div>
+                <div className="m-accordion-group" style={{ marginTop: 20 }}>
+                  <CollapsibleSection title="Greeks">
+                    <GreeksPanel greeks={greeksData} signal={signalData} error={greeksError} secondsLeft={polling ? secondsLeft : null} status={greeksStatus} hideHeader />
+                  </CollapsibleSection>
+                  <CollapsibleSection title="News vs options">
+                    <DivergencePanel signal={signalData} error={greeksError} hideHeader />
+                  </CollapsibleSection>
+                  <CollapsibleSection title="Volatility surface">
+                    <VolSurfacePanel signal={signalData} error={greeksError} hideHeader />
+                  </CollapsibleSection>
+                  <CollapsibleSection title="Gamma exposure">
+                    <GammaExposurePanel signal={signalData} error={greeksError} hideHeader />
+                  </CollapsibleSection>
+                </div>
+              </>
+            )}
+
+            {symbol && !noData && activeTab === "news" && <NewsPanel symbol={symbol} compact fullHeight />}
+          </div>
+
+          <nav className="m-tabbar">
+            {TABS.map(({ key, label, Icon }) => (
+              <button
+                key={key}
+                type="button"
+                className={`m-tab ${activeTab === key ? "active" : ""}`}
+                onClick={() => setActiveTab(key)}
+              >
+                <Icon />
+                <span className="m-tab-label">{label}</span>
+              </button>
+            ))}
+          </nav>
+
+          <Modal open={mAccountOpen} onClose={() => setMAccountOpen(false)} variant="sheet">
+            <div className="section-title">Simulated account</div>
+            <div className="row" style={{ justifyContent: "space-between", marginTop: 10 }}>
+              <span className="muted">Cash</span><span className="mono">{fmt$(cash)}</span>
+            </div>
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <span className="muted">Positions value</span><span className="mono">{fmt$(positionsValue)}</span>
+            </div>
+            <div className="row" style={{ justifyContent: "space-between", fontWeight: 600 }}>
+              <span>Total</span>
+              <span className={`mono ${totalPnl >= 0 ? "green" : "red"}`}>{fmt$(totalValue)}</span>
+            </div>
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <span className="muted">Since start</span>
+              <span className={`mono ${totalPnl >= 0 ? "green" : "red"}`}>{fmt$(totalPnl)}</span>
+            </div>
+            <div className="row" style={{ justifyContent: "flex-end", marginTop: 16 }}>
+              <button className="ghost" onClick={resetSim}>Reset simulator</button>
+            </div>
+          </Modal>
+
+          <Modal open={mChartSettingsOpen} onClose={() => setMChartSettingsOpen(false)} variant="sheet">
+            <div className="section-title">Chart settings</div>
+            <div className="muted" style={{ fontSize: 12, marginTop: 8, marginBottom: 4 }}>Interval</div>
+            <div className="chip-row">
+              {CANDLE_INTERVALS.map((iv) => (
+                <button
+                  key={iv}
+                  className={`chip ${iv === candleInterval ? "on" : ""}`}
+                  style={iv === candleInterval ? { background: "#4C8DFF", borderColor: "#4C8DFF" } : undefined}
+                  disabled={!INTRADAY_ONLY_RANGES.has(candleRange)}
+                  onClick={() => setCandleInterval(iv)}
+                >
+                  {iv}
+                </button>
+              ))}
+            </div>
+            <div className="muted" style={{ fontSize: 12, marginTop: 14, marginBottom: 4 }}>Indicators</div>
+            <IndicatorToggles active={activeInd} onToggle={toggleIndicator} onHelp={setHelpKey} disabled={false} iv={indicators?.iv} interval={candleInterval} />
+            <div className="row" style={{ justifyContent: "space-between", marginTop: 14 }}>
+              <label className="muted" style={{ fontSize: 12 }}>Poll every</label>
+              <select value={intervalSec} onChange={(e) => setIntervalSec(Number(e.target.value))}>
+                <option value={5}>5s</option>
+                <option value={30}>30s</option>
+                <option value={60}>60s</option>
+                <option value={120}>2m</option>
+              </select>
+              <button className="ghost" onClick={() => setPolling((p) => !p)}>{polling ? "Pause" : "Resume"}</button>
+            </div>
+            <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid var(--border-pane)", display: "flex", flexDirection: "column", gap: 8 }}>
+              <button className="ghost" style={{ width: "100%" }} onClick={pullSnapshot}>Refresh now</button>
+              <button className="ghost" style={{ width: "100%" }} title="Fetch fresh market data for this symbol" onClick={() => symbol && triggerRefresh(symbol)} disabled={!symbol}>
+                Fetch snapshot
+              </button>
+              <button className="ghost red" style={{ width: "100%", background: "transparent" }} title="Delete this symbol's fetched data and start over" onClick={resetSnapshot} disabled={!symbol}>
+                Reset snapshot
+              </button>
+            </div>
+          </Modal>
+
+          <Modal open={!!buyTarget} onClose={() => setBuyTarget(null)} variant="sheet">
+            {buyTargetDisplay && (
+              <>
+                <div className="section-title">Buy to open</div>
+                <div style={{ marginBottom: 10 }}>
+                  {symbol} {buyTargetDisplay.strike}{buyTargetDisplay.type === "call" ? "C" : "P"} {selectedExp}
+                  <div className="mono muted">mid {buyTargetDisplay.price.toFixed(2)}</div>
+                </div>
+                <label className="muted" style={{ fontSize: 12 }}>Contracts</label>
+                <input type="number" min={1} value={buyQty} onChange={(e) => setBuyQty(Math.max(1, Number(e.target.value)))} style={{ width: "100%", marginTop: 4, marginBottom: 12 }} />
+                <div className="row" style={{ justifyContent: "space-between", marginBottom: 14 }}>
+                  <span className="muted">Cost</span>
+                  <span className="mono">{fmt$(buyTargetDisplay.price * 100 * buyQty)}</span>
+                </div>
+                <div className="row" style={{ justifyContent: "flex-end", position: "sticky", bottom: 0, background: "var(--bg-card)", paddingTop: 8 }}>
+                  <button className="ghost" onClick={() => setBuyTarget(null)}>Cancel</button>
+                  <button className="buy" onClick={confirmBuy}>Confirm</button>
+                </div>
+              </>
+            )}
+          </Modal>
+
+          <IndicatorHelpModal helpKey={helpKey} onClose={() => setHelpKey(null)} variant="sheet" />
+        </>
+      ) : (
+      <>
       <ActiveRefreshesList serverUrl={SERVER_URL} />
 
       <div className="header">
@@ -728,16 +1456,6 @@ export default function App() {
               />
               <button type="submit" className="ghost" title="Fetch fresh market data for this symbol">Go</button>
             </form>
-            <a
-              href="/docs/how-it-works.html"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="ghost"
-              style={{ textDecoration: "none", display: "inline-flex", alignItems: "center" }}
-              title="How the signal score is computed"
-            >
-              How it works
-            </a>
           </div>
           {searchError && <div style={{ color: "#FF9B9B", fontSize: 12, marginTop: 4 }}>{searchError}</div>}
           {recentSymbols.length > 0 && (
@@ -830,15 +1548,13 @@ export default function App() {
       <div className="module">
         <div className="module-header row" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
           <div className="section-title" style={{ margin: 0 }}>Price</div>
-          <IndicatorToggles active={activeInd} onToggle={toggleIndicator} onHelp={setHelpKey} disabled={false} iv={indicators?.iv} interval={candleInterval} />
           <div className="row">
             <RefetchStatus secondsLeft={polling ? secondsLeft : null} status={fetchStatus} />
             <div className="chip-row" title="Date range">
               {CANDLE_RANGES.map((r) => (
                 <button
                   key={r.key}
-                  className={`chip ${r.key === candleRange ? "on" : ""}`}
-                  style={r.key === candleRange ? { background: "#4C8DFF", borderColor: "#4C8DFF" } : undefined}
+                  className={`range-chip ${r.key === candleRange ? "on" : ""}`}
                   onClick={() => setCandleRange(r.key)}
                 >
                   {r.label}
@@ -854,26 +1570,33 @@ export default function App() {
             >
               {CANDLE_INTERVALS.map((iv) => <option key={iv} value={iv}>{iv}</option>)}
             </select>
-            <label className="muted" style={{ fontSize: 12 }}>Poll every</label>
-            <select value={intervalSec} onChange={(e) => setIntervalSec(Number(e.target.value))}>
-              <option value={5}>5s</option>
-              <option value={30}>30s</option>
-              <option value={60}>60s</option>
-              <option value={120}>2m</option>
-            </select>
-            <button className="ghost" onClick={() => setPolling((p) => !p)}>{polling ? "Pause" : "Resume"}</button>
-            <button className="ghost" onClick={pullSnapshot}>Refresh now</button>
-            <button className="ghost" title="Fetch fresh market data for this symbol" onClick={() => symbol && triggerRefresh(symbol)} disabled={!symbol}>
-              Fetch snapshot
-            </button>
-            <button className="ghost" title="Delete this symbol's fetched data and start over" onClick={resetSnapshot} disabled={!symbol}>
-              Reset snapshot
-            </button>
+            <IndicatorMenu active={activeInd} onToggle={toggleIndicator} onHelp={setHelpKey} disabled={false} iv={indicators?.iv} interval={candleInterval} align="right" />
+            <DropdownMenu label="Actions" panelWidth={240} align="right">
+              <div className="indicator-menu-group">
+                <div className="indicator-menu-group-title">Poll every</div>
+                <select style={{ width: "100%" }} value={intervalSec} onChange={(e) => setIntervalSec(Number(e.target.value))}>
+                  <option value={5}>5s</option>
+                  <option value={30}>30s</option>
+                  <option value={60}>60s</option>
+                  <option value={120}>2m</option>
+                </select>
+              </div>
+              <div className="indicator-menu-group" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <button className="ghost" style={{ width: "100%" }} onClick={() => setPolling((p) => !p)}>{polling ? "Pause" : "Resume"}</button>
+                <button className="ghost" style={{ width: "100%" }} onClick={pullSnapshot}>Refresh now</button>
+                <button className="ghost" style={{ width: "100%" }} title="Fetch fresh market data for this symbol" onClick={() => symbol && triggerRefresh(symbol)} disabled={!symbol}>
+                  Fetch snapshot
+                </button>
+                <button className="ghost" style={{ width: "100%" }} title="Delete this symbol's fetched data and start over" onClick={resetSnapshot} disabled={!symbol}>
+                  Reset snapshot
+                </button>
+              </div>
+            </DropdownMenu>
           </div>
         </div>
         <div className="card">
           {chartBars.length ? (
-            <Candlestick bars={chartBars} height={280} series={chartSeries} active={activeInd} interval={candleInterval} />
+            <Candlestick bars={chartBars} height={520} series={chartSeries} active={activeInd} interval={candleInterval} />
           ) : (
             <div className="muted" style={{ padding: 20, textAlign: "center" }}>
               No {candleInterval} candles yet for {symbol ?? "this symbol"} — click &ldquo;Go&rdquo; to refresh it.
@@ -884,9 +1607,11 @@ export default function App() {
 
       <SummaryPanel quote={quote} greeks={greeksData} signal={signalData} symbol={symbol} />
 
-      <div className="module-header"><div className="section-title" style={{ margin: "0 0 10px" }}>Option chain</div></div>
-      <div className="grid module">
-        <div className="card">
+      <div className="module">
+      <div className="grid grid-stretch">
+        <div>
+          <div className="module-header"><div className="section-title" style={{ margin: 0 }}>Option chain</div></div>
+          <div className="card">
           <div className="row" style={{ justifyContent: "space-between" }}>
             <select
               value={selectedExp || ""}
@@ -922,6 +1647,11 @@ export default function App() {
                 q?.openInterest != null && `OI ${q.openInterest}`,
                 q?.volume != null && `vol ${q.volume}`,
               ].filter(Boolean).join(" · ") || undefined;
+            // 768-1023px: too narrow for 8 comfortable columns at readable font size —
+            // reuse the same horizontal-scroll/sticky-strike pattern as mobile (§4 of spec)
+            if (isTablet) {
+              return <MobileChainTable view={view} hasGreeks={hasGreeks} pickOf={pickOf} spot={quote?.price} setBuyTarget={setBuyTarget} />;
+            }
             return (
               <table style={{ marginTop: 10 }}>
                 <thead>
@@ -961,6 +1691,7 @@ export default function App() {
               </table>
             );
           })()}
+          </div>
         </div>
 
         <div>
@@ -998,7 +1729,7 @@ export default function App() {
             </table>
           )}
 
-          <div className="section-title" style={{ marginTop: 18 }}>Trade log</div>
+          <div className="subsection-title">Trade log</div>
           <div className="trade-log">
             {trades.length === 0 && <div className="muted">No trades yet.</div>}
             <AnimatePresence initial={false}>
@@ -1022,6 +1753,7 @@ export default function App() {
           </div>
         </div>
       </div>
+      </div>
 
       <div style={{ marginTop: 24 }}>
         <AutopilotPanel symbol={symbol} />
@@ -1030,24 +1762,23 @@ export default function App() {
       <div className="grid" style={{ marginTop: 24 }}>
         <div>
           <IndicatorsPanel data={indicators} error={indError} secondsLeft={polling ? secondsLeft : null} status={indStatus} active={activeInd} />
-        </div>
-        <div>
-          <NewsPanel symbol={symbol} />
-        </div>
-      </div>
-
-      <CollapsibleSection title="Advanced analytics" subtitle="Greeks · volatility surface · gamma exposure · news vs. options">
-        <div className="grid">
-          <div>
+          <div style={{ marginTop: 24 }}>
             <GreeksPanel greeks={greeksData} signal={signalData} error={greeksError} secondsLeft={polling ? secondsLeft : null} status={greeksStatus} />
+          </div>
+          <div style={{ marginTop: 24 }}>
             <VolSurfacePanel signal={signalData} error={greeksError} />
           </div>
-          <div>
+          <div style={{ marginTop: 24 }}>
             <DivergencePanel signal={signalData} error={greeksError} />
+          </div>
+          <div style={{ marginTop: 24 }}>
             <GammaExposurePanel signal={signalData} error={greeksError} />
           </div>
         </div>
-      </CollapsibleSection>
+        <div>
+          <NewsPanel symbol={symbol} fullHeight />
+        </div>
+      </div>
 
       <div className="row" style={{ marginTop: 16, justifyContent: "flex-end" }}>
         <button className="ghost" onClick={resetSim}>Reset simulator (manual paper account)</button>
@@ -1078,6 +1809,8 @@ export default function App() {
       </Modal>
 
       <IndicatorHelpModal helpKey={helpKey} onClose={() => setHelpKey(null)} />
+      </>
+      )}
     </div>
   );
 }

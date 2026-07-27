@@ -75,8 +75,52 @@ const bannerMotionProps = {
 };
 
 // status.status: "running" | "done" | "error" | "cooldown"
-export function RefreshProgressBanner({ status, onDismiss }) {
+// compact (mobile only): collapses to a single-line 28px strip; tapping it toggles an
+// inline-expanded state showing the same content as the full (non-compact) banner.
+export function RefreshProgressBanner({ status, onDismiss, compact = false }) {
   const { status: state, message, symbol } = status || {};
+  const [expanded, setExpanded] = useState(false);
+
+  if (compact) {
+    const compactLabel =
+      state === "error" ? `Refresh failed${symbol ? ` (${symbol})` : ""}` :
+      state === "cooldown" ? message :
+      state === "done" ? `✓ ${message || "Snapshot updated"}` :
+      state === "running" ? `Refreshing${symbol ? ` ${symbol}` : ""}…` : null;
+    return (
+      <AnimatePresence>
+        {status && (
+          <motion.div {...bannerMotionProps} style={{ overflow: "hidden" }}>
+            <button
+              type="button"
+              className="ghost refresh-strip"
+              onClick={() => setExpanded((e) => !e)}
+              aria-expanded={expanded}
+            >
+              {state === "running" && <span className="spinner" />}
+              <span className={`refresh-strip-label ${state === "error" ? "red" : state === "done" ? "green" : "muted"}`}>
+                {compactLabel}
+              </span>
+              <span className="muted" style={{ marginLeft: "auto", fontSize: 10 }}>{expanded ? "▾" : "▸"}</span>
+            </button>
+            {expanded && (
+              <div className="card refresh-banner" style={{ marginTop: 0, borderRadius: "0 0 8px 8px" }}>
+                {state === "error" && (
+                  <>
+                    <div className="muted" style={{ fontSize: 13 }}>{message || "Unknown error"}</div>
+                    <div className="row" style={{ justifyContent: "flex-end", marginTop: 6 }}>
+                      <button className="ghost" onClick={onDismiss}>Dismiss</button>
+                    </div>
+                  </>
+                )}
+                {state !== "error" && <div className="muted" style={{ fontSize: 13 }}>{message || compactLabel}</div>}
+              </div>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    );
+  }
 
   return (
     <AnimatePresence>

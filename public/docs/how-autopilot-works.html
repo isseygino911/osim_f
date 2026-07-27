@@ -1,0 +1,696 @@
+<title>How Autopilot Decides</title>
+<style>
+  @font-face {
+    font-family: 'JBMono';
+    src: local('JetBrains Mono');
+  }
+
+  :root {
+    --bg: #f3f1ec;
+    --bg-alt: #eae7df;
+    --card: #ffffff;
+    --card-border: #ddd8cc;
+    --ink: #1c1b18;
+    --ink-muted: #6b6558;
+    --ink-faint: #9b958684;
+    --accent: #2f5fb8;
+    --accent-soft: #e8eefc;
+    --good: #1a7f4e;
+    --good-soft: #e5f5ec;
+    --bad: #b8362f;
+    --bad-soft: #fbe9e7;
+    --warn: #a86a1a;
+    --warn-soft: #faf0dd;
+    --rule: #d8d2c4;
+    --shadow: 0 1px 2px rgba(28,27,24,0.04), 0 8px 24px rgba(28,27,24,0.05);
+  }
+
+  :root[data-theme="dark"] {
+    --bg: #14171b;
+    --bg-alt: #191d22;
+    --card: #1c2027;
+    --card-border: #2a2f38;
+    --ink: #e9e7e0;
+    --ink-muted: #9a9a92;
+    --ink-faint: #6b6f77;
+    --accent: #6f9cf2;
+    --accent-soft: #202a3d;
+    --good: #4fce93;
+    --good-soft: #16261f;
+    --bad: #ff8a80;
+    --bad-soft: #2c1b1a;
+    --warn: #e3ab54;
+    --warn-soft: #2b2314;
+    --rule: #2a2f38;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 30px rgba(0,0,0,0.35);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14171b;
+      --bg-alt: #191d22;
+      --card: #1c2027;
+      --card-border: #2a2f38;
+      --ink: #e9e7e0;
+      --ink-muted: #9a9a92;
+      --ink-faint: #6b6f77;
+      --accent: #6f9cf2;
+      --accent-soft: #202a3d;
+      --good: #4fce93;
+      --good-soft: #16261f;
+      --bad: #ff8a80;
+      --bad-soft: #2c1b1a;
+      --warn: #e3ab54;
+      --warn-soft: #2b2314;
+      --rule: #2a2f38;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 30px rgba(0,0,0,0.35);
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .mono {
+    font-family: 'JBMono', ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-feature-settings: "tnum";
+    font-variant-numeric: tabular-nums;
+  }
+
+  .page {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: clamp(28px, 5vw, 64px) clamp(18px, 4vw, 32px) 80px;
+  }
+
+  /* ---------- Header ---------- */
+
+  header.top {
+    margin-bottom: 40px;
+  }
+
+  .eyebrow {
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 600;
+    margin-bottom: 10px;
+  }
+
+  h1 {
+    font-size: clamp(28px, 4.5vw, 40px);
+    line-height: 1.08;
+    letter-spacing: -0.015em;
+    margin: 0 0 12px;
+    text-wrap: balance;
+    font-weight: 650;
+  }
+
+  .dek {
+    font-size: 16px;
+    color: var(--ink-muted);
+    max-width: 60ch;
+    margin: 0;
+  }
+
+  .runs-on {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 20px;
+    padding: 6px 12px;
+    border: 1px solid var(--rule);
+    border-radius: 99px;
+    font-size: 12.5px;
+    color: var(--ink-muted);
+  }
+
+  .runs-on .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--good);
+    box-shadow: 0 0 0 3px var(--good-soft);
+  }
+
+  /* ---------- Trigger row ---------- */
+
+  .triggers {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin-bottom: 6px;
+  }
+
+  .trigger {
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    box-shadow: var(--shadow);
+  }
+
+  .trigger .label {
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--ink-faint);
+    margin-bottom: 4px;
+  }
+
+  .trigger .val {
+    font-size: 13.5px;
+    font-weight: 600;
+  }
+
+  /* ---------- Pipeline ---------- */
+
+  .pipeline {
+    position: relative;
+    margin-top: 36px;
+  }
+
+  .spine {
+    position: absolute;
+    left: 23px;
+    top: 8px;
+    bottom: 8px;
+    width: 2px;
+    background: linear-gradient(var(--rule), var(--rule));
+    z-index: 0;
+  }
+
+  .stage {
+    position: relative;
+    display: grid;
+    grid-template-columns: 48px 1fr;
+    gap: 18px;
+    margin-bottom: 6px;
+  }
+
+  .stage-num {
+    position: relative;
+    z-index: 1;
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: var(--card);
+    border: 2px solid var(--rule);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--ink-muted);
+    flex-shrink: 0;
+    align-self: start;
+  }
+
+  .stage.accent .stage-num {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  .stage-body {
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 18px 20px;
+    box-shadow: var(--shadow);
+    margin-bottom: 26px;
+  }
+
+  .stage-title {
+    font-size: 15.5px;
+    font-weight: 650;
+    margin: 0 0 4px;
+    letter-spacing: -0.005em;
+  }
+
+  .stage-sub {
+    font-size: 13px;
+    color: var(--ink-muted);
+    margin: 0 0 14px;
+  }
+
+  .stage-sub code, .inline-code {
+    font-family: 'JBMono', ui-monospace, monospace;
+    font-size: 12px;
+    background: var(--bg-alt);
+    border: 1px solid var(--rule);
+    padding: 1px 5px;
+    border-radius: 4px;
+    color: var(--ink);
+  }
+
+  /* formula strip */
+  .formula {
+    font-family: 'JBMono', ui-monospace, monospace;
+    font-size: 13px;
+    background: var(--bg-alt);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    white-space: pre;
+    color: var(--ink);
+    margin: 10px 0;
+  }
+  .formula .op { color: var(--ink-faint); }
+  .formula .hi { color: var(--accent); font-weight: 600; }
+
+  /* input chip row */
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 10px;
+  }
+  .chip {
+    font-size: 11.5px;
+    padding: 4px 9px;
+    border-radius: 99px;
+    border: 1px solid var(--rule);
+    color: var(--ink-muted);
+    background: var(--bg-alt);
+  }
+
+  /* vote grid for indicators */
+  .votes {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .vote {
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 9px 11px;
+    font-size: 12px;
+    background: var(--bg-alt);
+  }
+  .vote .k { font-weight: 650; font-size: 12.5px; margin-bottom: 2px; }
+  .vote .v { color: var(--ink-muted); font-family: 'JBMono', monospace; font-size: 11px; }
+
+  /* decision gates */
+  .gates {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .gate {
+    display: grid;
+    grid-template-columns: 28px 1fr auto;
+    align-items: center;
+    gap: 10px;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 9px 12px 9px 10px;
+    font-size: 13px;
+  }
+  .gate .n {
+    font-family: 'JBMono', monospace;
+    font-size: 11px;
+    color: var(--ink-faint);
+  }
+  .gate .rule { color: var(--ink); }
+  .gate .rule .cond { color: var(--ink-muted); font-family: 'JBMono', monospace; font-size: 12px; }
+  .gate .out {
+    font-size: 11px;
+    font-weight: 650;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 3px 9px;
+    border-radius: 99px;
+    white-space: nowrap;
+  }
+  .gate .out.block { background: var(--bad-soft); color: var(--bad); }
+  .gate .out.pass { background: var(--good-soft); color: var(--good); }
+  .gate .out.warn { background: var(--warn-soft); color: var(--warn); }
+
+  /* two column split for expiration/strike */
+  .split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin-top: 4px;
+  }
+  @media (max-width: 640px) { .split { grid-template-columns: 1fr; } }
+
+  .sub-card {
+    border: 1px solid var(--rule);
+    border-radius: 9px;
+    padding: 12px 14px;
+    background: var(--bg-alt);
+  }
+  .sub-card h4 {
+    margin: 0 0 8px;
+    font-size: 12.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--ink-muted);
+  }
+  .sub-card ol, .sub-card ul {
+    margin: 0;
+    padding-left: 18px;
+    font-size: 12.5px;
+  }
+  .sub-card li { margin-bottom: 5px; }
+  .sub-card li:last-child { margin-bottom: 0; }
+
+  /* risk config table */
+  .risk-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12.5px;
+    margin-top: 10px;
+  }
+  .risk-table th {
+    text-align: left;
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--ink-faint);
+    font-weight: 600;
+    padding: 6px 10px 6px 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .risk-table td {
+    padding: 7px 10px 7px 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .risk-table tr:last-child td { border-bottom: none; }
+  .risk-table .rk { font-family: 'JBMono', monospace; color: var(--accent); }
+  .risk-table .rv { font-family: 'JBMono', monospace; font-weight: 650; }
+
+  /* branch outcomes at end */
+  .outcomes {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+  }
+  @media (max-width: 700px) { .outcomes { grid-template-columns: 1fr; } }
+
+  .outcome {
+    border-radius: 12px;
+    padding: 16px 16px 14px;
+    border: 1px solid var(--card-border);
+  }
+  .outcome.none { background: var(--bg-alt); }
+  .outcome.open { background: var(--good-soft); border-color: color-mix(in srgb, var(--good) 35%, var(--card-border)); }
+  .outcome.close { background: var(--bad-soft); border-color: color-mix(in srgb, var(--bad) 35%, var(--card-border)); }
+
+  .outcome .tag {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 700;
+    margin-bottom: 6px;
+  }
+  .outcome.none .tag { color: var(--ink-muted); }
+  .outcome.open .tag { color: var(--good); }
+  .outcome.close .tag { color: var(--bad); }
+  .outcome p { font-size: 12.5px; margin: 0; color: var(--ink-muted); }
+  .outcome p code { font-family: 'JBMono', monospace; font-size: 11.5px; }
+
+  /* limits note */
+  .limits-note {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    background: var(--warn-soft);
+    border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--card-border));
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-top: 14px;
+    font-size: 12.5px;
+    color: var(--ink);
+  }
+  .limits-note .ic { color: var(--warn); font-weight: 700; font-family: 'JBMono', monospace; flex-shrink: 0; }
+
+  footer {
+    margin-top: 48px;
+    padding-top: 20px;
+    border-top: 1px solid var(--rule);
+    font-size: 12px;
+    color: var(--ink-faint);
+  }
+
+  ::selection { background: var(--accent-soft); color: var(--ink); }
+</style>
+
+<div class="page">
+
+  <header class="top">
+    <div class="eyebrow">Options simulator &middot; autopilot internals</div>
+    <h1>How the autopilot actually decides</h1>
+    <p class="dek">A trace of the real decision loop, end to end &mdash; what it reads, how it scores, and exactly where it will and won't pull the trigger. No paraphrasing: every number below is a live constant in the code.</p>
+    <div class="runs-on"><span class="dot"></span> One 60-second tick drives every enabled symbol independently &middot; <span class="mono">autopilot.service.js</span></div>
+  </header>
+
+  <div class="triggers">
+    <div class="trigger">
+      <div class="label">Scheduled</div>
+      <div class="val">Every 60s, per symbol</div>
+    </div>
+    <div class="trigger">
+      <div class="label">Manual</div>
+      <div class="val">"Run now" &rarr; one symbol, instantly</div>
+    </div>
+    <div class="trigger">
+      <div class="label">On enable</div>
+      <div class="val">Fires immediately, doesn't wait for tick</div>
+    </div>
+  </div>
+
+  <div class="pipeline">
+    <div class="spine"></div>
+
+    <!-- STAGE 1 -->
+    <div class="stage accent">
+      <div class="stage-num">1</div>
+      <div class="stage-body">
+        <h3 class="stage-title">Gather &mdash; snapshot, positions, news</h3>
+        <p class="stage-sub">Before any scoring happens, the tick assembles everything it needs to reason about this symbol.</p>
+        <div class="chips">
+          <span class="chip">live snapshot (quotes + chains)</span>
+          <span class="chip">greeks backfilled via Black-Scholes where missing</span>
+          <span class="chip">open positions marked to current bid/ask</span>
+          <span class="chip">relevant news, scored for direction</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- STAGE 2 -->
+    <div class="stage accent">
+      <div class="stage-num">2</div>
+      <div class="stage-body">
+        <h3 class="stage-title">Exit check &mdash; runs first, runs always</h3>
+        <p class="stage-sub">Every open position is checked against stop-loss / take-profit <em>before</em> anything else &mdash; even if autopilot is currently disabled for this symbol.</p>
+        <div class="gates">
+          <div class="gate">
+            <span class="n">if</span>
+            <span class="rule">P&amp;L on position <span class="cond">&le; &minus;35%</span></span>
+            <span class="out block">close &middot; stop-loss</span>
+          </div>
+          <div class="gate">
+            <span class="n">if</span>
+            <span class="rule">P&amp;L on position <span class="cond">&ge; +60%</span></span>
+            <span class="out block">close &middot; take-profit</span>
+          </div>
+        </div>
+        <div class="limits-note">
+          <span class="ic">!</span>
+          <span>There is no time-based exit. A position doesn't get closed just because expiration is approaching or the signal reversed &mdash; only these two P&amp;L thresholds trigger a close.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- STAGE 3 -->
+    <div class="stage accent">
+      <div class="stage-num">3</div>
+      <div class="stage-body">
+        <h3 class="stage-title">Score the technicals</h3>
+        <p class="stage-sub">Seven indicators each cast a vote from &minus;1 to +1, averaged and scaled to <span class="inline-code">&minus;100&hellip;+100</span>.</p>
+        <div class="votes">
+          <div class="vote"><div class="k">RSI(14)</div><div class="v">&lt;30 &rarr; +1 &middot; &gt;70 &rarr; &minus;1</div></div>
+          <div class="vote"><div class="k">MACD vs signal</div><div class="v">above &rarr; +1 &middot; below &rarr; &minus;1</div></div>
+          <div class="vote"><div class="k">SMA20 vs SMA50</div><div class="v">above &rarr; +1 &middot; below &rarr; &minus;1</div></div>
+          <div class="vote"><div class="k">Bollinger Bands</div><div class="v">&le; lower &rarr; +1 &middot; &ge; upper &rarr; &minus;1</div></div>
+          <div class="vote"><div class="k">Stochastic %K/%D</div><div class="v">&lt;20 &rarr; +1 &middot; &gt;80 &rarr; &minus;1</div></div>
+          <div class="vote"><div class="k">VWAP vs price</div><div class="v">weight &plusmn;0.5</div></div>
+          <div class="vote"><div class="k">ADX/DI cross</div><div class="v">only votes if ADX &ge; 25</div></div>
+        </div>
+        <div class="formula">techScore <span class="op">=</span> average(votes) <span class="op">&times;</span> 100</div>
+        <div class="limits-note">
+          <span class="ic">i</span>
+          <span>StochRSI is computed but deliberately does <em>not</em> vote &mdash; it would double-count the same momentum idea as RSI.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- STAGE 4 -->
+    <div class="stage accent">
+      <div class="stage-num">4</div>
+      <div class="stage-body">
+        <h3 class="stage-title">Blend in news, then dampen for options quality</h3>
+        <p class="stage-sub">The technical score is combined with news sentiment, then discounted if the options themselves are unfavorable to trade right now.</p>
+        <div class="formula">directionalScore <span class="op">=</span> techScore <span class="hi">&times; 0.75</span> <span class="op">+</span> newsScore <span class="hi">&times; 0.25</span></div>
+        <div class="split">
+          <div class="sub-card">
+            <h4>Options-conditions penalty (0 to &minus;100)</h4>
+            <ul>
+              <li>ATM IV rich &rarr; up to &minus;50</li>
+              <li>Bid/ask spread wide &rarr; up to &minus;30</li>
+              <li>Open interest thin &rarr; flat &minus;20</li>
+            </ul>
+          </div>
+          <div class="sub-card">
+            <h4>Informational only &mdash; never affects the trade</h4>
+            <ul>
+              <li>News-vs-options divergence verdict</li>
+              <li>Options positioning bias (skew/OI read)</li>
+              <li>Volatility surface, gamma exposure</li>
+            </ul>
+          </div>
+        </div>
+        <div class="formula">combinedScore <span class="op">=</span> directionalScore <span class="op">&times;</span> (1 <span class="op">+</span> optionsScore / 200)</div>
+      </div>
+    </div>
+
+    <!-- STAGE 5 -->
+    <div class="stage accent">
+      <div class="stage-num">5</div>
+      <div class="stage-body">
+        <h3 class="stage-title">Trade gate &mdash; first blocking rule wins</h3>
+        <p class="stage-sub">Checked strictly in this order. The moment one blocks, everything below it is skipped.</p>
+        <div class="gates">
+          <div class="gate">
+            <span class="n">01</span>
+            <span class="rule">today's P&amp;L <span class="cond">&le; &minus;15%</span> of equity</span>
+            <span class="out block">no trade &middot; daily circuit-breaker</span>
+          </div>
+          <div class="gate">
+            <span class="n">02</span>
+            <span class="rule">open positions <span class="cond">&ge; 3</span></span>
+            <span class="out block">no trade &middot; position cap</span>
+          </div>
+          <div class="gate">
+            <span class="n">03</span>
+            <span class="rule">combinedScore <span class="cond">&minus;30 &hellip; +30</span></span>
+            <span class="out block">no trade &middot; hold</span>
+          </div>
+          <div class="gate">
+            <span class="n">04</span>
+            <span class="rule">combinedScore <span class="cond">&ge; +30</span></span>
+            <span class="out pass">buy call</span>
+          </div>
+          <div class="gate">
+            <span class="n">04</span>
+            <span class="rule">combinedScore <span class="cond">&le; &minus;30</span></span>
+            <span class="out pass">buy put</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STAGE 6 -->
+    <div class="stage accent">
+      <div class="stage-num">6</div>
+      <div class="stage-body">
+        <h3 class="stage-title">Pick expiration &amp; strike</h3>
+        <p class="stage-sub">Only reached once the gate above passes &mdash; direction is decided, now it needs an actual contract.</p>
+        <div class="split">
+          <div class="sub-card">
+            <h4>Expiration</h4>
+            <ol>
+              <li>Keep expirations 3&ndash;10 days out with chain data</li>
+              <li>Sort nearest first</li>
+              <li>Skip any where daily theta burn <span class="inline-code">&gt; 6%</span> of premium&hellip;</li>
+              <li>&hellip;unless it's the last one left (never fully rejects)</li>
+            </ol>
+          </div>
+          <div class="sub-card">
+            <h4>Strike</h4>
+            <ol>
+              <li>Target delta closest to <span class="inline-code">0.40</span></li>
+              <li>Skip strikes with open interest <span class="inline-code">&lt; 100</span></li>
+              <li>Skip strikes with spread <span class="inline-code">&gt; 10%</span> of mark</li>
+              <li>No delta data at all? &rarr; fall back to nearest 1%-OTM strike, unfiltered</li>
+            </ol>
+          </div>
+        </div>
+        <div class="limits-note">
+          <span class="ic">!</span>
+          <span>If delta data exists but every strike fails the OI/spread filters, autopilot does <em>not</em> fall back to the crude 1%-OTM rule &mdash; it just declines to trade.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- STAGE 7 -->
+    <div class="stage accent">
+      <div class="stage-num">7</div>
+      <div class="stage-body">
+        <h3 class="stage-title">Size the position</h3>
+        <div class="formula">qty <span class="op">=</span> floor( min(equity <span class="hi">&times; 35%</span>, cash) / (mid <span class="op">&times;</span> 100) )</div>
+        <p class="stage-sub" style="margin-top: 10px; margin-bottom: 0;">Capped at 35% of total equity per trade <em>and</em> by available cash. Rounds down to whole contracts &mdash; if that's zero, no trade.</p>
+      </div>
+    </div>
+
+  </div><!-- /pipeline -->
+
+  <!-- OUTCOMES -->
+  <h2 style="font-size: 15px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-muted); margin: 8px 0 14px;">Every tick ends one of three ways</h2>
+  <div class="outcomes">
+    <div class="outcome none">
+      <div class="tag">No trade</div>
+      <p>Any gate blocks &mdash; hold signal, position cap, daily loss limit, no valid strike. <code>lastDecision.reason</code> records exactly which one.</p>
+    </div>
+    <div class="outcome open">
+      <div class="tag">Position opened</div>
+      <p>Gate passed, strike found, size &ge; 1 contract. Cash debited, trade logged as <code>BUY</code>.</p>
+    </div>
+    <div class="outcome close">
+      <div class="tag">Position closed</div>
+      <p>Stop-loss or take-profit hit on an existing position. Cash credited, trade logged as <code>SELL</code> with the reason.</p>
+    </div>
+  </div>
+
+  <!-- RISK CONFIG -->
+  <h2 style="font-size: 15px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-muted); margin: 40px 0 4px;">The constants behind every number above</h2>
+  <p style="font-size: 12.5px; color: var(--ink-muted); margin: 0 0 4px;">One shared <span class="inline-code">RISK</span> object, defined once in <span class="inline-code">strategy.service.js</span>.</p>
+  <div class="stage-body" style="margin-top: 14px;">
+    <table class="risk-table">
+      <thead><tr><th>Constant</th><th>Value</th><th>Used for</th></tr></thead>
+      <tbody>
+        <tr><td class="rk">maxPositionPctOfEquity</td><td class="rv">0.35</td><td>Position sizing cap</td></tr>
+        <tr><td class="rk">maxDailyLossPct</td><td class="rv">0.15</td><td>Daily circuit-breaker</td></tr>
+        <tr><td class="rk">maxOpenPositions</td><td class="rv">3</td><td>Position count cap</td></tr>
+        <tr><td class="rk">stopLossPct</td><td class="rv">0.35</td><td>Exit &mdash; stop-loss</td></tr>
+        <tr><td class="rk">takeProfitPct</td><td class="rv">0.60</td><td>Exit &mdash; take-profit</td></tr>
+        <tr><td class="rk">minSignalScoreToTrade</td><td class="rv">30</td><td>Entry threshold, both directions</td></tr>
+        <tr><td class="rk">targetDelta</td><td class="rv">0.40</td><td>Strike selection</td></tr>
+        <tr><td class="rk">minOpenInterest</td><td class="rv">100</td><td>Strike liquidity filter</td></tr>
+        <tr><td class="rk">maxSpreadPct</td><td class="rv">0.10</td><td>Strike liquidity filter</td></tr>
+        <tr><td class="rk">maxDailyThetaPct</td><td class="rv">0.06</td><td>Expiration selection</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="limits-note" style="margin-top: 20px;">
+    <span class="ic">i</span>
+    <span>The "10%/week goal" shown in the UI is a <strong>display metric only</strong> &mdash; it's tracked and shown as a progress bar, but it never throttles sizing or gates a trade. It's for you to watch, not something the bot optimizes toward.</span>
+  </div>
+
+  <footer>
+    Traced directly from <span class="mono">server/services/{autopilot,strategy,indicators,greeks}.service.js</span> &middot; every threshold above is a live constant, not an approximation.
+  </footer>
+
+</div>

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { narrateAutopilot } from "./narrator.js";
-import { useCountdown, RefetchStatus } from "./RefetchStatus.jsx";
+import { useCountdown, RefetchStatus, LoadingScreen } from "./RefetchStatus.jsx";
 import NewsDetailDrawer from "./NewsDetailDrawer.jsx";
 import useMediaQuery from "./useMediaQuery.js";
 
@@ -22,11 +22,40 @@ async function api(path, opts) {
 }
 
 const sentClass = (s) => (s === "positive" || s === "bullish" ? "green" : s === "negative" || s === "bearish" ? "red" : "amber");
+const dirClass = (d) => (d === "bullish" ? "green" : d === "bearish" ? "red" : "muted");
 
 function scoreColor(score) {
   if (score >= 12) return "green";
   if (score <= -12) return "red";
   return "amber";
+}
+
+// Shared "why" breakdown — same shape used by IndicatorsPanel's composite.reasons,
+// and now by GreeksPanel/DivergencePanel/VolSurfacePanel/GammaExposurePanel/NewsPanel:
+// [{ factor|indicator, direction, why, vote? }]. One list renderer instead of five
+// near-identical ones.
+function ReasonsList({ title, reasons }) {
+  if (!reasons?.length) return null;
+  return (
+    <div className="card" style={{ marginTop: 8 }}>
+      <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>{title}</div>
+      <ul style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 4 }}>
+        {reasons.map((r, i) => (
+          <li key={r.factor ?? r.indicator ?? i} style={{ fontSize: 12 }}>
+            {(r.factor ?? r.indicator) && (
+              <>
+                <span className={dirClass(r.direction)} style={{ fontWeight: 600 }}>{r.factor ?? r.indicator}</span>
+                {" "}
+                <span className={dirClass(r.direction)}>({r.direction}{r.vote != null && r.direction !== "neutral" ? `, ${r.vote > 0 ? "+" : ""}${r.vote}` : ""})</span>
+                {" — "}
+              </>
+            )}
+            <span className="muted">{r.why}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 // Presentational: App.jsx owns the /api/indicators fetch so the chart overlays
@@ -53,14 +82,13 @@ export function IndicatorsPanel({ data, error, secondsLeft, status, active = nul
           <RefetchStatus secondsLeft={secondsLeft} status={status} updatedAt={updatedAt} />
         </div>
         <div className="card">
-          <div className="muted">Loading…</div>
+          <LoadingScreen />
         </div>
       </div>
     );
   }
 
   const { latest, composite, iv } = data;
-  const dirClass = (d) => (d === "bullish" ? "green" : d === "bearish" ? "red" : "muted");
   const allRows = [
     ["rsi", "RSI (14)", latest.rsi14?.toFixed(1), Number.isFinite(latest.rsi14) && latest.rsi14 < 30 ? "green" : Number.isFinite(latest.rsi14) && latest.rsi14 > 70 ? "red" : ""],
     ["macd", "MACD", latest.macd?.toFixed(2), latest.macd > latest.macdSignal ? "green" : "red"],
@@ -104,24 +132,7 @@ export function IndicatorsPanel({ data, error, secondsLeft, status, active = nul
           </tbody>
         </table>
       </div>
-      {composite.reasons?.length > 0 && (
-        <div className="card" style={{ marginTop: 8 }}>
-          <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
-            Why {composite.label.replace("_", " ").toUpperCase()}: each indicator&rsquo;s vote
-          </div>
-          <ul style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 4 }}>
-            {composite.reasons.map((r) => (
-              <li key={r.indicator} style={{ fontSize: 12 }}>
-                <span className={dirClass(r.direction)} style={{ fontWeight: 600 }}>{r.indicator}</span>
-                {" "}
-                <span className={dirClass(r.direction)}>({r.direction}{r.direction !== "neutral" ? `, ${r.vote > 0 ? "+" : ""}${r.vote}` : ""})</span>
-                {" — "}
-                <span className="muted">{r.why}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      <ReasonsList title={`Why ${composite.label.replace("_", " ").toUpperCase()}: each indicator's vote`} reasons={composite.reasons} />
     </div>
   );
 }
@@ -226,7 +237,6 @@ export function NewsPanel({ symbol = "QQQ", fullHeight = false, compact = false,
               href={item.link}
               target="_blank"
               rel="noreferrer"
-              title={item.aiReason || undefined}
               style={{ color: "#E7E9EA", textDecoration: "none", fontSize: 13, cursor: "pointer" }}
               onClick={(e) => { e.preventDefault(); setOpenItem(item); }}
             >
@@ -247,6 +257,7 @@ export function NewsPanel({ symbol = "QQQ", fullHeight = false, compact = false,
               )}
               {item.publishedAt && <span className="muted">{new Date(item.publishedAt).toLocaleTimeString()}</span>}
             </div>
+            {item.aiReason && <div className="muted" style={{ fontSize: 11, marginTop: 2 }}>{item.aiReason}</div>}
           </motion.div>
         ))}
       </AnimatePresence>
@@ -255,7 +266,8 @@ export function NewsPanel({ symbol = "QQQ", fullHeight = false, compact = false,
           No {symbol}-relevant headlines right now (relevance ≥ 25) — {data.items.length} headlines scanned.
         </div>
       )}
-      {!data?.items?.length && !error && <div className="muted">Loading news…</div>}
+      {!data?.items?.length && !error && <LoadingScreen label="Loading news…" />}
+      <ReasonsList title={data?.overall ? `Why ${data.overall.sentiment.toUpperCase()}: overall read` : null} reasons={data?.overall?.reasons} />
     </div>
   );
 
@@ -301,7 +313,7 @@ export function DivergencePanel({ signal, error, hideHeader = false, secondsLeft
   const inner = (
     <>
       {error && <div className="muted" style={{ fontSize: 12 }}>{error}</div>}
-      {!nvo && !error && <div className="muted">Loading…</div>}
+      {!nvo && !error && <LoadingScreen />}
       {nvo && (
         <>
           <div className="mono" style={{ fontSize: 12 }}>
@@ -332,6 +344,7 @@ export function DivergencePanel({ signal, error, hideHeader = false, secondsLeft
             </tbody>
           </table>
           <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>{nvo.implication}</div>
+          <ReasonsList title={`Why ${nvo.verdict.toUpperCase()}`} reasons={nvo.reasons} />
         </>
       )}
     </>
@@ -370,7 +383,7 @@ export function VolSurfacePanel({ signal, error, hideHeader = false, secondsLeft
   const inner = (
     <>
       {error && <div className="muted" style={{ fontSize: 12 }}>{error}</div>}
-      {!vs && !error && <div className="muted">Loading…</div>}
+      {!vs && !error && <LoadingScreen />}
       {vs && (
         <table>
           <tbody>
@@ -411,6 +424,7 @@ export function VolSurfacePanel({ signal, error, hideHeader = false, secondsLeft
           </tbody>
         </table>
       )}
+      <ReasonsList title="Why these labels" reasons={vs?.reasons} />
     </>
   );
 
@@ -442,7 +456,7 @@ export function GammaExposurePanel({ signal, error, hideHeader = false, secondsL
   const inner = (
     <>
       {error && <div className="muted" style={{ fontSize: 12 }}>{error}</div>}
-      {!gex && !error && <div className="muted">Loading…</div>}
+      {!gex && !error && <LoadingScreen />}
       {gex && gex.netGex == null && <div className="muted">Not enough gamma/open-interest data on this chain yet.</div>}
       {gex && gex.netGex != null && (
         <>
@@ -465,6 +479,7 @@ export function GammaExposurePanel({ signal, error, hideHeader = false, secondsL
           </table>
         </>
       )}
+      <ReasonsList title="Why this regime" reasons={gex?.reasons} />
     </>
   );
 
@@ -520,7 +535,7 @@ export function GreeksPanel({ greeks, signal, error, secondsLeft, status, hideHe
       </div>
     );
   if (error) return shell(<div className="muted" style={{ fontSize: 12 }}>{error}</div>);
-  if (!greeks || !signal) return shell(<div className="muted">Loading…</div>);
+  if (!greeks || !signal) return shell(<LoadingScreen />);
 
   const factors = signal.optionsFactors;
   const exp = factors?.expiration ?? greeks.preview?.expiration ?? null;
@@ -589,6 +604,10 @@ export function GreeksPanel({ greeks, signal, error, secondsLeft, status, hideHe
       <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
         Greeks {greeks.schemaVersion >= 2 ? "from data provider" : "computed via Black-Scholes from quotes"} · r={greeks.riskFreeRate}
       </div>
+      <ReasonsList
+        title={signal.optionsScore === 0 ? "Why CONDITIONS CLEAR" : `Why CONDITIONS ${signal.optionsScore?.toFixed(1)}`}
+        reasons={factors?.reasons}
+      />
     </>
   );
 }
@@ -658,7 +677,7 @@ export function AutopilotPanel({ symbol = "QQQ" }) {
     return (
       <div className="module">
         <div className="module-header"><div className="section-title" style={{ margin: 0 }}>Autopilot</div></div>
-        <div className="card"><div className="muted">{error || "Loading…"}</div></div>
+        <div className="card">{error ? <div className="muted">{error}</div> : <LoadingScreen />}</div>
       </div>
     );
   }

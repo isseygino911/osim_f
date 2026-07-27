@@ -8,7 +8,7 @@ import { loadKey, saveKey } from "./storage.js";
 import { IndicatorsPanel, NewsPanel, AutopilotPanel, GreeksPanel, DivergencePanel, VolSurfacePanel, GammaExposurePanel } from "./Autopilot.jsx";
 import { Modal } from "./Modal.jsx";
 import SummaryPanel from "./SummaryPanel.jsx";
-import { useCountdown, RefetchStatus } from "./RefetchStatus.jsx";
+import { useCountdown, RefetchStatus, LoadingScreen } from "./RefetchStatus.jsx";
 import { useRefreshStatusPoll, ActiveRefreshesList, RefreshProgressBanner } from "./RefreshProgress.jsx";
 import useMediaQuery from "./useMediaQuery.js";
 
@@ -34,84 +34,6 @@ export function CollapsibleSection({ title, subtitle, defaultOpen = false, child
         <RefetchStatus secondsLeft={secondsLeft} status={status} updatedAt={updatedAt} />
       </button>
       {open && <div style={{ marginTop: 10 }}>{children}</div>}
-    </div>
-  );
-}
-
-// Mobile/tablet option chain: Robinhood-style full-width row list. A Call/Put
-// toggle picks one side at a time (rather than cramming both into a scrolling
-// table), each row stacks strike + breakeven info on the left with a pill
-// button showing live mid price on the right — tap the pill to open the buy
-// sheet, tap "+" to bump quantity by one contract before opening it.
-function MobileChainTable({ view, hasGreeks, pickOf, spot, setBuyTarget }) {
-  const [side, setSide] = useState("call");
-  const listRef = useRef(null);
-  const strikes = view.strikes;
-
-  useEffect(() => {
-    if (!listRef.current || !strikes.length) return;
-    let nearestIdx = 0;
-    if (spot != null) {
-      let best = Infinity;
-      strikes.forEach((s, i) => {
-        const d = Math.abs(s.strike - spot);
-        if (d < best) {
-          best = d;
-          nearestIdx = i;
-        }
-      });
-    }
-    const row = listRef.current.querySelector(`[data-strike-idx="${nearestIdx}"]`);
-    row?.scrollIntoView({ block: "center" });
-    // only re-center when the expiration (i.e. the strike set) or side changes
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [strikes.length && strikes[0]?.strike, strikes.length && strikes[strikes.length - 1]?.strike, side]);
-
-  return (
-    <div style={{ marginTop: 10 }}>
-      <div className="chain-side-toggle">
-        <button type="button" className={side === "call" ? "on" : ""} onClick={() => setSide("call")}>Call</button>
-        <button type="button" className={side === "put" ? "on" : ""} onClick={() => setSide("put")}>Put</button>
-      </div>
-      <div ref={listRef} className="chain-row-list">
-        {strikes.map((s, i) => {
-          const opt = s[side];
-          const mid = (opt.bid + opt.ask) / 2;
-          const pick = pickOf(s.strike) === side;
-          const breakeven = spot != null ? (side === "call" ? s.strike + mid : s.strike - mid) : null;
-          const toBreakevenPct = spot != null ? ((breakeven - spot) / spot) * 100 : null;
-          return (
-            <div key={s.strike} data-strike-idx={i} className={`chain-row ${pick ? "picked" : ""}`}>
-              <div className="chain-row-info">
-                <div className="chain-row-strike mono">${s.strike} {side === "call" ? "Call" : "Put"}</div>
-                {breakeven != null ? (
-                  <>
-                    <div className="chain-row-sub muted">Breakeven <span className="mono">{fmt$(breakeven)}</span></div>
-                    <div className="chain-row-sub muted">
-                      To breakeven <span className={`mono ${toBreakevenPct >= 0 ? "green" : "red"}`}>{toBreakevenPct >= 0 ? "+" : ""}{toBreakevenPct.toFixed(2)}%</span>
-                    </div>
-                  </>
-                ) : (
-                  hasGreeks && (
-                    <div className="chain-row-sub muted">
-                      IV <span className="mono">{opt?.iv != null ? (opt.iv * 100).toFixed(0) + "%" : "–"}</span>
-                      &nbsp;&middot;&nbsp;Δ <span className="mono">{opt?.delta != null ? opt.delta.toFixed(2) : "–"}</span>
-                    </div>
-                  )
-                )}
-              </div>
-              <button
-                type="button"
-                className={`chain-row-pill ${side}`}
-                onClick={() => setBuyTarget({ type: side, strike: s.strike, price: mid })}
-              >
-                <span className="mono">{fmt$(mid)}</span>
-                <span className="chain-row-pill-plus">+</span>
-              </button>
-            </div>
-          );
-        })}
-      </div>
     </div>
   );
 }
@@ -223,14 +145,6 @@ function rangeDays(rangeKey) {
 
 const fmt$ = (n) => (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtPct = (n) => (n > 0 ? "+" : "") + n.toFixed(2) + "%";
-// "2026-07-31" -> "Jul 31" — the mobile expiration chip row is too narrow to show
-// full ISO dates without wrapping/overflowing; the full date is still in the title attr.
-const formatExpShort = (iso) => {
-  const [, m, d] = iso.split("-");
-  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  return `${MONTHS[Number(m) - 1]} ${Number(d)}`;
-};
-
 // Data comes from a JSON snapshot the server fetches directly from Tradier's API and
 // writes to disk. This app never calls a market-data provider itself — it just polls
 // that snapshot via GET /api/snapshot.
@@ -268,14 +182,6 @@ function ChartTabIcon() {
     </svg>
   );
 }
-function TradeTabIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round">
-      <path d="M4 7l5-3 5 3v5l-5 3-5-3z" />
-      <path d="M10 12l5-3 5 3v5l-5 3-5-3z" />
-    </svg>
-  );
-}
 function SignalTabIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -296,7 +202,6 @@ function NewsTabIcon() {
 
 const TABS = [
   { key: "chart", label: "Chart", Icon: ChartTabIcon },
-  { key: "trade", label: "Trade", Icon: TradeTabIcon },
   { key: "signal", label: "Signal", Icon: SignalTabIcon },
   { key: "news", label: "News", Icon: NewsTabIcon },
 ];
@@ -314,10 +219,6 @@ export default function App() {
   const [candleInterval, setCandleInterval] = useState(CANDLE_INTERVAL_DEFAULT);
   const [candleRange, setCandleRange] = useState(CANDLE_RANGE_DEFAULT);
   const [quote, setQuote] = useState(null); // {price, change, changePct, asOf}
-  const [expirations, setExpirations] = useState([]);
-  const [selectedExp, setSelectedExp] = useState(null);
-  const [chain, setChain] = useState(null); // {strikes:[{strike,call:{bid,ask},put:{bid,ask}}]}
-  const [chainLoading, setChainLoading] = useState(false);
   const [polling, setPolling] = useState(true);
   const [intervalSec, setIntervalSec] = useState(POLL_DEFAULT);
   const [error, setError] = useState(null);
@@ -335,9 +236,7 @@ export default function App() {
   const [lastFetchAt, setLastFetchAt] = useState(null); // ms timestamp of last completed snapshot poll (success or failure)
   const [lastFetchOk, setLastFetchOk] = useState(null); // true | false | null (no fetch completed yet)
   const pollRef = useRef(null);
-  const chainsRef = useRef({}); // { [expiration]: {strikes:[...]} } from the last snapshot pull
   const lastSnapshotRef = useRef(null); // raw snapshot from the last successful pull, for re-slicing candles on interval change
-  const selectedExpRef = useRef(selectedExp); // always-current mirror of selectedExp for async closures below
   const candleIntervalRef = useRef(candleInterval); // always-current mirror of candleInterval for pullSnapshot's async closure
   const symbolRef = useRef(symbol); // always-current symbol so in-flight pulls for a switched-away symbol get dropped
   symbolRef.current = symbol;
@@ -346,9 +245,8 @@ export default function App() {
   // there's no other automatic news poll anymore (see Autopilot.jsx's commented-out NEWS_POLL_MS interval).
   const [newsRefreshToken, setNewsRefreshToken] = useState(0);
 
-  // mobile shell state — see the design spec (§4) for the 767px/1023px breakpoints
+  // mobile shell state — see the design spec (§4) for the 767px breakpoint
   const isMobile = useMediaQuery("(max-width: 767px)");
-  const isTablet = useMediaQuery("(min-width: 768px) and (max-width: 1023px)");
   const [activeTab, setActiveTab] = useState(() => {
     const stored = typeof sessionStorage !== "undefined" ? sessionStorage.getItem(K_ACTIVE_TAB) : null;
     return TABS.some((t) => t.key === stored) ? stored : "chart";
@@ -460,12 +358,6 @@ export default function App() {
     setActiveInd((cur) => (cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key]));
   }, []);
 
-  // keep selectedExpRef current so async continuations (pullSnapshot) can read the
-  // latest user selection instead of whatever was captured when they started
-  useEffect(() => {
-    selectedExpRef.current = selectedExp;
-  }, [selectedExp]);
-
   // 3m/1y ranges exceed Tradier's ~2-month intraday lookback cap — force the interval
   // to daily candles whenever one of those ranges is picked, since that's the only data
   // that can actually cover them (see CANDLE_RANGES' comment above).
@@ -485,10 +377,6 @@ export default function App() {
 
   const pullSnapshot = useCallback(async () => {
     if (!symbol) return;
-    // only show the loading placeholder when there's nothing cached yet (first load /
-    // symbol switch) — routine polls that already have a chain on screen should update
-    // it in place instead of unmounting the table every cycle
-    if (Object.keys(chainsRef.current).length === 0) setChainLoading(true);
     try {
       const snap = await fetchSnapshot(symbol);
       if (symbolRef.current !== symbol) return; // user switched symbols while this pull was in flight
@@ -510,35 +398,6 @@ export default function App() {
         setCandles(candlesFor(snap, candleIntervalRef.current));
       }
 
-      const exps = snap.expirations || [];
-      setExpirations(exps);
-
-      const chains = snap.chains || {};
-      chainsRef.current = chains;
-
-      setSelectedExp((cur) => {
-        if (cur && exps.includes(cur)) return cur;
-        // prefer the first expiration we actually have chain data for
-        return exps.find((d) => chains[d]) ?? exps[0] ?? null;
-      });
-      setChain((cur) => {
-        // read the latest selection via ref, not the `selectedExp` captured when this
-        // async call started — otherwise an in-flight poll can overwrite a chain the
-        // user has since switched away from with stale data for the old expiration
-        const currentExp = selectedExpRef.current;
-        const activeExp = currentExp && exps.includes(currentExp) ? currentExp : exps.find((d) => chains[d]) ?? exps[0];
-        return activeExp && chains[activeExp] ? chains[activeExp] : cur;
-      });
-
-      // mark held positions from whichever chain(s) are present in this snapshot
-      setPositions((prev) =>
-        prev.map((pos) => {
-          const c = chains[pos.expiration];
-          const row = c?.strikes?.find((s) => s.strike === pos.strike);
-          const q = row?.[pos.type];
-          return q ? { ...pos, mark: (q.bid + q.ask) / 2 } : pos;
-        })
-      );
       setPollCount((c) => c + 1);
       setLastFetchOk(true);
       setNoData(false);
@@ -555,32 +414,8 @@ export default function App() {
       setLastFetchOk(false);
     } finally {
       if (symbolRef.current === symbol) {
-        setChainLoading(false);
         setLastFetchAt(Date.now());
       }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedExp, symbol]);
-
-  // fetch one expiration's chain (server-enriched with computed greeks/IV) when the
-  // user picks a date — fresher than whatever the last snapshot poll cached, and the
-  // 404 copy tells them to refresh for expirations the snapshot doesn't cover yet
-  const fetchChain = useCallback(async (expiration) => {
-    if (!symbol || !expiration) return;
-    setChainLoading(true);
-    try {
-      const res = await fetch(`${SERVER_URL}/api/chain?symbol=${symbol}&expiration=${expiration}`);
-      const data = await res.json().catch(() => ({}));
-      if (symbolRef.current !== symbol || selectedExpRef.current !== expiration) return; // switched away mid-flight
-      if (res.ok && data.chain) {
-        chainsRef.current = { ...chainsRef.current, [expiration]: data.chain };
-        setChain(data.chain);
-      }
-      // 404 → leave the current chain; the "No data yet for {date}" hint renders
-    } catch {
-      // network error → the snapshot poll keeps the chain fresh; nothing extra to show
-    } finally {
-      if (symbolRef.current === symbol && selectedExpRef.current === expiration) setChainLoading(false);
     }
   }, [symbol]);
 
@@ -591,10 +426,6 @@ export default function App() {
     setQuote(null);
     setCandles([]);
     lastSnapshotRef.current = null;
-    setExpirations([]);
-    setSelectedExp(null);
-    setChain(null);
-    chainsRef.current = {};
     setIndicators(null);
     setGreeksData(null);
     setSignalData(null);
@@ -703,10 +534,6 @@ export default function App() {
     setQuote(null);
     setCandles([]);
     lastSnapshotRef.current = null;
-    setExpirations([]);
-    setSelectedExp(null);
-    setChain(null);
-    chainsRef.current = {};
     setIndicators(null);
     setGreeksData(null);
     setSignalData(null);
@@ -745,7 +572,7 @@ export default function App() {
       symbol,
       type: buyTarget.type,
       strike: buyTarget.strike,
-      expiration: selectedExp,
+      expiration: null, // manual buy flow is disabled — option chain (and its expiration selection) was removed
       qty: buyQty,
       entryPrice: buyTarget.price,
       mark: buyTarget.price,
@@ -897,27 +724,6 @@ export default function App() {
         .price-big { font-size:var(--text-price-lg); font-weight:600; letter-spacing:-0.5px; transition: color .5s ease; }
         .price-big.flash-up { color:var(--green); transition: color 60ms ease; }
         .price-big.flash-down { color:var(--red); transition: color 60ms ease; }
-        .grid { display:grid; grid-template-columns: 1.1fr 1fr; gap:16px; }
-        @media (max-width:1023px) { .grid { grid-template-columns: 1fr; } }
-
-        /* chain (mobile/tablet): Robinhood-style call/put toggle + full-width row list */
-        .chain-side-toggle { display:flex; gap:8px; margin-bottom:10px; }
-        .chain-side-toggle button { flex:1; padding:10px; border-radius:var(--radius-pill); background:var(--bg-card); border:1px solid var(--border-default); color:var(--text-muted); font-weight:600; font-size:14px; }
-        .chain-side-toggle button.on { background:var(--bg-pane); border-color:var(--accent-blue); color:var(--text-primary); }
-        .chain-row-list { max-height: 60vh; overflow-y:auto; -webkit-overflow-scrolling:touch; }
-        .chain-row { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:14px 4px; border-bottom:1px solid var(--border-hairline); min-height:64px; box-sizing:border-box; }
-        .chain-row.picked { background:rgba(76,141,255,.07); margin:0 -8px; padding-left:12px; padding-right:12px; border-radius:var(--radius-sm); }
-        .chain-row-info { display:flex; flex-direction:column; gap:3px; min-width:0; }
-        .chain-row-strike { font-size:15px; font-weight:600; }
-        .chain-row-sub { font-size:12px; }
-        .chain-row-pill { flex:0 0 auto; display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:var(--radius-pill); background:transparent; border:1.5px solid var(--accent-blue); color:var(--accent-blue); font-weight:600; font-size:15px; min-height:var(--tap-target-min); }
-        .chain-row-pill.put { border-color:var(--sell-border); color:var(--sell-text); }
-        .chain-row-sub .green { color:var(--accent-blue); }
-        .chain-row-pill-plus { font-size:16px; font-weight:400; opacity:.8; padding-left:8px; border-left:1px solid currentColor; }
-        .grid-stretch { align-items:stretch; }
-        .grid-stretch > div { display:flex; flex-direction:column; }
-        .grid-stretch > div > .card { flex:1; display:flex; flex-direction:column; }
-        .grid-stretch .trade-log { flex:1; }
         table { width:100%; border-collapse:collapse; font-size:13px; }
         th { text-align:right; color:var(--text-muted); font-weight:500; padding:6px 8px; border-bottom:1px solid var(--border-default); }
         th:first-child, td:first-child { text-align:left; }
@@ -1110,9 +916,6 @@ export default function App() {
           .m-tab, .m-account-btn, .m-chart-settings-btn { min-width: var(--tap-target-min); min-height: var(--tap-target-min); }
         }
 
-        @media (min-width: 768px) and (max-width: 1023px) {
-          .chain-row-list { max-height: 70vh; }
-        }
       `}</style>
 
       {isMobile ? (
@@ -1239,58 +1042,14 @@ export default function App() {
                   {chartBars.length ? (
                     <Candlestick bars={chartBars} height={280} series={chartSeries} active={activeInd} interval={candleInterval} isMobile />
                   ) : (
-                    <div className="muted" style={{ padding: 20, textAlign: "center" }}>
-                      No {candleInterval} candles yet for {symbol} — pull to refresh.
-                    </div>
+                    <LoadingScreen />
                   )}
                 </div>
                 <div style={{ marginTop: 12 }}>
-                  <SummaryPanel quote={quote} greeks={greeksData} signal={signalData} symbol={symbol} isMobile secondsLeft={null} updatedAt={lastFetchAt} status={fetchStatus} />
+                  <SummaryPanel quote={quote} greeks={greeksData} signal={signalData} symbol={symbol} isMobile secondsLeft={null} updatedAt={lastFetchAt} status={fetchStatus} noData={noData} />
                 </div>
               </>
             )}
-
-            {symbol && !noData && activeTab === "trade" && (() => {
-              const view = greeksData?.chains?.[selectedExp] ?? chain;
-              const hasGreeks = view?.strikes?.some((s) => s.call?.delta != null || s.put?.delta != null);
-              const preview = greeksData?.preview?.expiration === selectedExp ? greeksData.preview : null;
-              const pickOf = (strike) =>
-                preview?.call?.strike === strike ? "call" : preview?.put?.strike === strike ? "put" : null;
-              return (
-                <>
-                  <div className="m-exp-row">
-                    {expirations.map((d) => (
-                      <button
-                        key={d}
-                        className={`range-chip m-exp-chip ${d === selectedExp ? "on" : ""}`}
-                        title={d}
-                        onClick={() => {
-                          setSelectedExp(d);
-                          selectedExpRef.current = d;
-                          if (chainsRef.current[d]) setChain(chainsRef.current[d]);
-                          fetchChain(d);
-                        }}
-                      >
-                        {formatExpShort(d)}
-                      </button>
-                    ))}
-                  </div>
-
-                  {chainLoading && <div className="muted" style={{ marginTop: 10 }}>Loading chain…</div>}
-                  {!chainLoading && selectedExp && !chainsRef.current[selectedExp] && (
-                    <div className="muted" style={{ marginTop: 10, fontSize: 12 }}>
-                      No data yet for {selectedExp}.{chain ? " Showing last loaded expiration below." : " Tap the ticker and hit “Go” to refresh."}
-                    </div>
-                  )}
-
-                  {view && !chainLoading && (
-                    <MobileChainTable view={view} hasGreeks={hasGreeks} pickOf={pickOf} preview={preview} spot={quote?.price} setBuyTarget={() => {}} />
-                  )}
-
-                  {/* Trading disabled for now — Open positions / Trade log hidden from UI */}
-                </>
-              );
-            })()}
 
             {symbol && !noData && activeTab === "signal" && (
               <>
@@ -1444,8 +1203,10 @@ export default function App() {
                   <span className={`price-big mono ${priceFlash === "up" ? "flash-up" : priceFlash === "down" ? "flash-down" : ""}`}>{fmt$(quote.price)}</span>
                   <span className={`mono ${up ? "green" : "red"}`}>{fmtPct(quote.changePct)} ({up ? "+" : ""}{quote.change.toFixed(2)})</span>
                 </div>
+              ) : noData ? (
+                <div className="muted" style={{ marginTop: 10 }}>No data yet.</div>
               ) : (
-                <div className="muted" style={{ marginTop: 10 }}>{noData ? "No data yet." : "Loading quote…"}</div>
+                <LoadingScreen />
               )}
               {quote && <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>as of {new Date(quote.asOf).toLocaleTimeString()}</div>}
             </motion.div>
@@ -1543,166 +1304,20 @@ export default function App() {
         <div className="card">
           {chartBars.length ? (
             <Candlestick bars={chartBars} height={520} series={chartSeries} active={activeInd} interval={candleInterval} />
-          ) : (
+          ) : noData ? (
             <div className="muted" style={{ padding: 20, textAlign: "center" }}>
               No {candleInterval} candles yet for {symbol ?? "this symbol"} — click &ldquo;Go&rdquo; to refresh it.
             </div>
+          ) : (
+            <LoadingScreen />
           )}
         </div>
       </div>
 
-      <SummaryPanel quote={quote} greeks={greeksData} signal={signalData} symbol={symbol} secondsLeft={null} updatedAt={lastFetchAt} status={fetchStatus} />
+      <SummaryPanel quote={quote} greeks={greeksData} signal={signalData} symbol={symbol} secondsLeft={null} updatedAt={lastFetchAt} status={fetchStatus} noData={noData} />
 
-      <div className="module">
-      <div className="grid grid-stretch">
-        <div>
-          <div className="module-header"><div className="section-title" style={{ margin: 0 }}>Option chain</div></div>
-          <div className="card">
-          <div className="row" style={{ justifyContent: "space-between" }}>
-            <select
-              value={selectedExp || ""}
-              onChange={(e) => {
-                const date = e.target.value;
-                setSelectedExp(date);
-                selectedExpRef.current = date; // update now — fetchChain's stale guard reads it before the effect runs
-                if (chainsRef.current[date]) setChain(chainsRef.current[date]); // instant paint from cache…
-                fetchChain(date); // …then refresh that expiration from the server
-              }}
-            >
-              {expirations.map((d) => <option key={d} value={d}>{d}</option>)}
-            </select>
-          </div>
-          {chainLoading && <div className="muted" style={{ marginTop: 10 }}>Loading chain…</div>}
-          {!chainLoading && selectedExp && !chainsRef.current[selectedExp] && (
-            <div className="muted" style={{ marginTop: 10, fontSize: 12 }}>
-              No data yet for {selectedExp}.{chain ? " Showing last loaded expiration below." : " Click “Go” to refresh."}
-            </div>
-          )}
-          {chain && !chainLoading && (() => {
-            // prefer the server-enriched chain (computed greeks/IV) when available for this
-            // expiration; fall back to the raw snapshot rows otherwise
-            const view = greeksData?.chains?.[selectedExp] ?? chain;
-            const hasGreeks = view.strikes.some((s) => s.call?.delta != null || s.put?.delta != null);
-            // highlight the strikes the autopilot would buy (only for the expiration it analyzed)
-            const preview = greeksData?.preview?.expiration === selectedExp ? greeksData.preview : null;
-            const pickOf = (strike) =>
-              preview?.call?.strike === strike ? "call" : preview?.put?.strike === strike ? "put" : null;
-            const sideTip = (q) =>
-              [
-                q?.theta != null && `θ ${q.theta.toFixed(3)}/day`,
-                q?.openInterest != null && `OI ${q.openInterest}`,
-                q?.volume != null && `vol ${q.volume}`,
-              ].filter(Boolean).join(" · ") || undefined;
-            // 768-1023px: too narrow for 8 comfortable columns at readable font size —
-            // reuse the same horizontal-scroll/sticky-strike pattern as mobile (§4 of spec)
-            if (isTablet) {
-              return <MobileChainTable view={view} hasGreeks={hasGreeks} pickOf={pickOf} spot={quote?.price} setBuyTarget={setBuyTarget} />;
-            }
-            return (
-              <table style={{ marginTop: 10 }}>
-                <thead>
-                  <tr>
-                    {hasGreeks && <th>Δ</th>}
-                    {hasGreeks && <th>IV</th>}
-                    <th>Call bid/ask</th><th>Strike</th><th>Put bid/ask</th>
-                    {hasGreeks && <th>IV</th>}
-                    {hasGreeks && <th>Δ</th>}
-                  </tr>
-                </thead>
-                <tbody>
-                  {view.strikes.map((s) => (
-                    <motion.tr
-                      key={s.strike}
-                      animate={{ backgroundColor: pickOf(s.strike) ? "rgba(76,141,255,.07)" : "rgba(76,141,255,0)" }}
-                      transition={{ duration: 0.25, ease: "easeOut" }}
-                      title={pickOf(s.strike) ? `autopilot ${pickOf(s.strike)} pick (${preview[pickOf(s.strike)].mode})` : undefined}
-                    >
-                      {hasGreeks && <td className="mono" title={sideTip(s.call)}>{s.call?.delta != null ? s.call.delta.toFixed(2) : "–"}</td>}
-                      {hasGreeks && <td className="mono">{s.call?.iv != null ? (s.call.iv * 100).toFixed(0) + "%" : "–"}</td>}
-                      <td className="mono">{s.call.bid.toFixed(2)}/{s.call.ask.toFixed(2)}</td>
-                      <td className="strike-cell mono">{s.strike}</td>
-                      <td className="mono">{s.put.bid.toFixed(2)}/{s.put.ask.toFixed(2)}</td>
-                      {hasGreeks && <td className="mono">{s.put?.iv != null ? (s.put.iv * 100).toFixed(0) + "%" : "–"}</td>}
-                      {hasGreeks && <td className="mono" title={sideTip(s.put)}>{s.put?.delta != null ? s.put.delta.toFixed(2) : "–"}</td>}
-                      {/* Trading disabled for now — Buy/Sell column hidden from UI */}
-                    </motion.tr>
-                  ))}
-                </tbody>
-              </table>
-            );
-          })()}
-          </div>
-        </div>
-
-        {/* Trading disabled for now — Open positions / Trade log hidden from UI */}
-        {false && (
-        <div>
-          <div className="module-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div className="section-title" style={{ margin: 0 }}>Open positions</div>
-            <RefetchStatus secondsLeft={null} updatedAt={lastFetchAt} status={fetchStatus} />
-          </div>
-          <div className="card">
-          {positions.length === 0 && <div className="muted">No open positions.</div>}
-          {positions.length > 0 && (
-            <table>
-              <thead><tr><th>Contract</th><th>Qty</th><th>Entry</th><th>Mark</th><th>P&amp;L</th><th></th></tr></thead>
-              <tbody>
-                <AnimatePresence initial={false}>
-                  {positions.map((p) => {
-                    const mark = p.mark ?? p.entryPrice;
-                    const pnl = (mark - p.entryPrice) * 100 * p.qty;
-                    return (
-                      <motion.tr
-                        key={p.id}
-                        layout
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        exit={{ opacity: 0 }}
-                        transition={{ duration: 0.2, ease: "easeOut" }}
-                      >
-                        <td className="mono">{p.symbol ?? symbol} {p.strike}{p.type === "call" ? "C" : "P"} {p.expiration}</td>
-                        <td className="mono">{p.qty}</td>
-                        <td className="mono">{p.entryPrice.toFixed(2)}</td>
-                        <td className="mono">{mark.toFixed(2)}</td>
-                        <td className={`mono ${pnl >= 0 ? "green" : "red"}`}>{fmt$(pnl)}</td>
-                        <td><button className="ghost" onClick={() => closePosition(p)}>Close</button></td>
-                      </motion.tr>
-                    );
-                  })}
-                </AnimatePresence>
-              </tbody>
-            </table>
-          )}
-
-          <div className="subsection-title">Trade log</div>
-          <div className="trade-log">
-            {trades.length === 0 && <div className="muted">No trades yet.</div>}
-            <AnimatePresence initial={false}>
-              {trades.map((t) => (
-                <motion.div
-                  key={`${t.id}-${t.action}`}
-                  layout
-                  initial={{ opacity: 0, y: -6 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.2, ease: "easeOut" }}
-                  className="mono"
-                  style={{ fontSize: 12, padding: "4px 0", borderBottom: "1px solid #1A1D21" }}
-                >
-                  <span className={t.action === "BUY" ? "green" : "red"}>{t.action}</span> {t.qty}x {t.symbol ?? symbol} {t.strike}{t.type === "call" ? "C" : "P"} {t.expiration} @ {(t.action === "BUY" ? t.entryPrice : t.closePrice).toFixed(2)}
-                  <span className="muted"> &middot; {new Date(t.at).toLocaleTimeString()}</span>
-                </motion.div>
-              ))}
-            </AnimatePresence>
-          </div>
-          </div>
-        </div>
-        )}
-
-        <div>
-          <NewsPanel symbol={symbol} fullHeight refreshToken={newsRefreshToken} />
-        </div>
-      </div>
+      <div style={{ marginTop: 24 }}>
+        <NewsPanel symbol={symbol} fullHeight refreshToken={newsRefreshToken} />
       </div>
 
       {/* Trading disabled for now — Autopilot hidden from UI, see server refresh.service.js/autopilot.service.js AUTO_REFRESH_ENABLED/AUTOPILOT_LOOP_ENABLED */}

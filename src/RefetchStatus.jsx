@@ -25,6 +25,18 @@ function formatUpdatedAt(ms) {
   return `${date} ${h}:${min}${ampm}`;
 }
 
+// Reusable "still waiting for data" state — same .spinner/@keyframes spin already
+// used by RefreshProgress.jsx's banners, so loading looks consistent everywhere
+// instead of every module rolling its own bare "Loading…" text.
+export function LoadingScreen({ label = "Loading…" }) {
+  return (
+    <div className="row" style={{ gap: 8, padding: "20px 0", justifyContent: "center" }}>
+      <span className="spinner" />
+      <span className="muted">{label}</span>
+    </div>
+  );
+}
+
 // status: "success" | "error" | null (null = no fetch has completed yet)
 export function RefetchStatus({ secondsLeft, status, updatedAt }) {
   if (status == null && secondsLeft == null && updatedAt == null) return null;

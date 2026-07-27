@@ -104,6 +104,63 @@ function DragHandle({ onDragStart, onDragEnd }) {
   );
 }
 
+const TOOLTIP_W = 190; // estimated rendered width, used only for edge-flip math
+const TOOLTIP_MARGIN = 12;
+
+function tooltipPos(clientX, clientY, containerW) {
+  let left = clientX + TOOLTIP_MARGIN;
+  if (left + TOOLTIP_W > containerW) left = clientX - TOOLTIP_MARGIN - TOOLTIP_W;
+  left = Math.max(4, left);
+  return { left, top: clientY + TOOLTIP_MARGIN };
+}
+
+// Hover tooltip: full OHLCV + every active indicator's value at the hovered bar, shown
+// near the cursor regardless of which pane (price or an oscillator) is being hovered.
+function ChartTooltip({ bar, interval, legend, x, y, containerW }) {
+  const up = bar.close >= bar.open;
+  const { left, top } = tooltipPos(x, y, containerW);
+  const dateLabel =
+    interval === "1d"
+      ? new Date(bar.t).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })
+      : new Date(bar.t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+
+  return (
+    <div className="chart-tooltip mono" style={{ position: "absolute", left, top, pointerEvents: "none", zIndex: 5 }}>
+      <div className="chart-tooltip-date muted">{dateLabel}</div>
+      <div className="chart-tooltip-row">
+        <span className="muted">O</span> <span className={up ? "green" : "red"}>{bar.open.toFixed(2)}</span>
+        <span className="muted">H</span> <span className={up ? "green" : "red"}>{bar.high.toFixed(2)}</span>
+        <span className="muted">L</span> <span className={up ? "green" : "red"}>{bar.low.toFixed(2)}</span>
+        <span className="muted">C</span> <span className={up ? "green" : "red"}>{bar.close.toFixed(2)}</span>
+      </div>
+      <div className="chart-tooltip-row muted">Vol {bar.volume.toLocaleString()}</div>
+      {legend.length > 0 && (
+        <div className="chart-tooltip-indicators">
+          {legend.map((l) => (
+            <div key={l.key} style={{ color: l.color }}>
+              {l.label} <span style={{ opacity: 0.85 }}>{l.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const TICK_PX = 60; // roughly one tick per this many px of plot height
+const MIN_TICKS = 5;
+const MAX_TICKS = 12;
+
+// Evenly spaced axis ticks, scaled to the pane's actual plotted height so a taller
+// (drag-resized) pane shows proportionally more labels instead of a fixed count. `extra`
+// values (e.g. an oscillator's guide lines) are always included even if off-grid.
+function axisTicks(d0, d1, plotHeightPx, extra = []) {
+  const count = Math.max(MIN_TICKS, Math.min(MAX_TICKS, Math.round(plotHeightPx / TICK_PX) + 1));
+  const ticks = new Set(Array.from({ length: count }, (_, i) => d0 + ((d1 - d0) * i) / (count - 1)));
+  for (const v of extra) ticks.add(v);
+  return Array.from(ticks).sort((a, b) => a - b);
+}
+
 function paneDomain(cfg, series, n) {
   if (cfg.domain) return cfg.domain;
   const keys = cfg.histogram ? [...cfg.series, cfg.histogram] : cfg.series;
@@ -133,7 +190,9 @@ function paneDomain(cfg, series, n) {
 // active: array of indicator keys from indicatorConfig to draw (optional)
 export default function Candlestick({ bars, height = 280, series = null, active = [], interval = "1d" }) {
   const outerRef = useRef(null);
-  const [hover, setHover] = useState(null); // { index, x }
+  const [hover, setHover] = useState(null); // { index, x, clientX, clientY }
+  // pane-local vertical crosshair: { pane: paneKey, y: raw pixel Y inside that pane's svg }
+  const [hoverY, setHoverY] = useState(null);
   const [width, setWidth] = useState(600);
   const [order, setOrder] = useState(() => sanitizeOrder(loadKey(K_PANE_ORDER, ALL_PANES)));
   const [dragKey, setDragKey] = useState(null);
@@ -164,6 +223,7 @@ export default function Candlestick({ bars, height = 280, series = null, active 
   // with 60 candles to one with 19) would otherwise index past the end of `bars`
   useEffect(() => {
     setHover(null);
+    setHoverY(null);
   }, [bars]);
 
   // resync chart width on window resize — the render-time check below only fires
@@ -309,6 +369,7 @@ export default function Candlestick({ bars, height = 280, series = null, active 
   const volH = 44;
   const priceH = priceHeight - volH - PRICE_PAD.top - PRICE_PAD.bottom;
   const yPrice = (p) => PRICE_PAD.top + priceH - ((p - min) / (max - min || 1)) * priceH;
+  const priceAtY = (y) => max - ((y - PRICE_PAD.top) / (priceH || 1)) * (max - min || 1);
   const yVol = (v) => PRICE_PAD.top + priceH + volH - (v / maxVol) * (volH - 4);
   const xCenter = (i) => PAD_X.left + gap * i + gap / 2;
 
@@ -317,7 +378,21 @@ export default function Candlestick({ bars, height = 280, series = null, active 
     const rect = outerRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left - PAD_X.left;
     const idx = Math.max(0, Math.min(bars.length - 1, Math.round((x - gap / 2) / gap)));
-    setHover({ index: idx, x: xCenter(idx) });
+    setHover({
+      index: idx,
+      x: xCenter(idx),
+      clientX: e.clientX - rect.left,
+      clientY: e.clientY - rect.top,
+    });
+  }
+
+  // Pane-local vertical position for the horizontal crosshair + axis value badge —
+  // tracked per-pane (via each svg's own onMouseMove) rather than off the outer
+  // container, so it stays correct regardless of pane order/height.
+  function handlePaneMoveY(e, paneKey, paneHeight) {
+    const svgRect = e.currentTarget.getBoundingClientRect();
+    const y = Math.max(0, Math.min(paneHeight, e.clientY - svgRect.top));
+    setHoverY({ pane: paneKey, y });
   }
 
   // Click a candle while the AVWAP chip is on to re-anchor it there. Fires after mouseup,
@@ -369,8 +444,8 @@ export default function Candlestick({ bars, height = 280, series = null, active 
   const h = bars[readIdx];
   const hUp = h.close >= h.open;
 
-  // y-axis ticks (5 evenly spaced price levels)
-  const ticks = Array.from({ length: 5 }, (_, i) => min + ((max - min) * i) / 4);
+  // y-axis price ticks, scaled to the pane's actual plotted height
+  const ticks = axisTicks(min, max, priceH);
 
   const legend = activeCfgs.map((cfg) => {
     const dec = cfg.domain ? 1 : 2;
@@ -395,7 +470,15 @@ export default function Candlestick({ bars, height = 280, series = null, active 
   const visiblePanes = order.filter((k) => k === "price" || oscCfgByPane.has(k));
 
   return (
-    <div ref={outerRef} style={{ position: "relative", width: "100%" }} onMouseMove={handleMove} onMouseLeave={() => setHover(null)}>
+    <div
+      ref={outerRef}
+      style={{ position: "relative", width: "100%" }}
+      onMouseMove={handleMove}
+      onMouseLeave={() => {
+        setHover(null);
+        setHoverY(null);
+      }}
+    >
       <div className="row" style={{ justifyContent: "space-between", marginBottom: 4, fontSize: 12 }}>
         <span className="mono">
           O <span className={hUp ? "green" : "red"}>{h.open.toFixed(2)}</span>{"  "}
@@ -439,9 +522,9 @@ export default function Candlestick({ bars, height = 280, series = null, active 
                   height={priceHeight}
                   style={{ display: "block", cursor: avwapOn ? "crosshair" : "ns-resize" }}
                   onMouseDown={(e) => beginResize(e, "price", priceHeight, PRICE_HEIGHT_RANGE)}
+                  onMouseMove={(e) => handlePaneMoveY(e, "price", priceHeight)}
                   onClick={handlePriceClick}
                 >
-                  <title>{avwapOn ? "Click a candle to re-anchor AVWAP — drag to resize" : "Drag vertically to resize"}</title>
                   {ticks.map((t, i) => (
                     <g key={i}>
                       <line x1={PAD_X.left} x2={width - PAD_X.right} y1={yPrice(t)} y2={yPrice(t)} stroke={GRID} strokeWidth={1} />
@@ -523,6 +606,16 @@ export default function Candlestick({ bars, height = 280, series = null, active 
                   })}
 
                   {hover && <line x1={hover.x} x2={hover.x} y1={0} y2={priceHeight} stroke={AXIS} strokeWidth={1} strokeDasharray="3,3" opacity={0.6} />}
+
+                  {hoverY?.pane === "price" && hoverY.y >= PRICE_PAD.top && hoverY.y <= PRICE_PAD.top + priceH && (
+                    <g>
+                      <line x1={PAD_X.left} x2={width - PAD_X.right} y1={hoverY.y} y2={hoverY.y} stroke={AXIS} strokeWidth={1} strokeDasharray="3,3" opacity={0.6} />
+                      <rect x={0} y={hoverY.y - 8} width={PAD_X.left - 2} height={16} rx={3} fill="#4C8DFF" />
+                      <text x={PAD_X.left - 6} y={hoverY.y} fill="#0B0D0F" fontSize={10} fontWeight={600} textAnchor="end" dominantBaseline="middle" fontFamily="ui-monospace, monospace">
+                        {priceAtY(hoverY.y).toFixed(2)}
+                      </text>
+                    </g>
+                  )}
                 </svg>
               </div>
             );
@@ -534,7 +627,8 @@ export default function Candlestick({ bars, height = 280, series = null, active 
           const plotTop = OSC_PAD.top;
           const plotH = paneHeight - OSC_PAD.top - OSC_PAD.bottom;
           const y = (v) => plotTop + plotH - ((v - d0) / (d1 - d0 || 1)) * plotH;
-          const edgeLabels = cfg.guides ?? [d1, d0];
+          const valueAtY = (py) => d1 - ((py - plotTop) / (plotH || 1)) * (d1 - d0 || 1);
+          const edgeLabels = axisTicks(d0, d1, plotH, cfg.guides ?? []);
 
           return (
             <div key={paneKey} className={cardClass} onDragOver={(e) => handleDragOver(e, paneKey)} onDrop={handleDrop}>
@@ -547,8 +641,8 @@ export default function Candlestick({ bars, height = 280, series = null, active 
                 height={paneHeight}
                 style={{ display: "block", cursor: "ns-resize" }}
                 onMouseDown={(e) => beginResize(e, paneKey, paneHeight, OSC_HEIGHT_RANGE)}
+                onMouseMove={(e) => handlePaneMoveY(e, paneKey, paneHeight)}
               >
-                <title>Drag vertically to resize</title>
                 {edgeLabels.map((g, i) => (
                   <text key={`l${i}`} x={PAD_X.left - 8} y={y(g)} fill={AXIS} fontSize={9} textAnchor="end" dominantBaseline="middle" fontFamily="ui-monospace, monospace">
                     {Math.abs(g) >= 100 || Number.isInteger(g) ? g.toFixed(0) : g.toFixed(2)}
@@ -590,11 +684,32 @@ export default function Candlestick({ bars, height = 280, series = null, active 
                 ))}
 
                 {hover && <line x1={hover.x} x2={hover.x} y1={0} y2={paneHeight} stroke={AXIS} strokeWidth={1} strokeDasharray="3,3" opacity={0.6} />}
+
+                {hoverY?.pane === paneKey && hoverY.y >= plotTop && hoverY.y <= plotTop + plotH && (
+                  <g>
+                    <line x1={PAD_X.left} x2={width - PAD_X.right} y1={hoverY.y} y2={hoverY.y} stroke={AXIS} strokeWidth={1} strokeDasharray="3,3" opacity={0.6} />
+                    <rect x={0} y={hoverY.y - 8} width={PAD_X.left - 2} height={16} rx={3} fill={cfg.color} />
+                    <text x={PAD_X.left - 6} y={hoverY.y} fill="#0B0D0F" fontSize={9} fontWeight={600} textAnchor="end" dominantBaseline="middle" fontFamily="ui-monospace, monospace">
+                      {valueAtY(hoverY.y).toFixed(Math.abs(valueAtY(hoverY.y)) >= 100 ? 0 : 2)}
+                    </text>
+                  </g>
+                )}
               </svg>
             </div>
           );
         })}
       </div>
+
+      {hover && (
+        <ChartTooltip
+          bar={bars[readIdx]}
+          interval={interval}
+          legend={legend}
+          x={hover.clientX}
+          y={hover.clientY}
+          containerW={width}
+        />
+      )}
     </div>
   );
 }

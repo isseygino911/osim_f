@@ -32,7 +32,7 @@ export function narrateOptions(quality, expiration, penalties, symbol = "QQQ") {
     return {
       tone: "muted",
       label: null,
-      sentences: ["No options analytics yet — ask Claude to refresh a snapshot with option quotes."],
+      sentences: ["No options analytics yet — click “Go” to fetch a snapshot with option quotes."],
     };
   }
   const pen = { iv: 0, spread: 0, oi: 0, ...(penalties || {}) };

@@ -1,17 +1,50 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import Candlestick from "./Candlestick.jsx";
 import IndicatorHelpModal from "./IndicatorHelpModal.jsx";
 import IndicatorToggles from "./IndicatorToggles.jsx";
 import { DEFAULT_ACTIVE, sanitizeActive } from "./indicatorConfig.js";
 import { loadKey, saveKey } from "./storage.js";
-import { IndicatorsPanel, NewsPanel, AutopilotPanel, GreeksPanel, DivergencePanel } from "./Autopilot.jsx";
+import { IndicatorsPanel, NewsPanel, AutopilotPanel, GreeksPanel, DivergencePanel, VolSurfacePanel, GammaExposurePanel } from "./Autopilot.jsx";
+import { Modal } from "./Modal.jsx";
 import SummaryPanel from "./SummaryPanel.jsx";
 import { useCountdown, RefetchStatus } from "./RefetchStatus.jsx";
 import { useRefreshStatusPoll, ActiveRefreshesList, RefreshProgressBanner } from "./RefreshProgress.jsx";
 
+// Keeps rendering the last non-null value while `value` is null, so a modal's content
+// stays on screen during its exit animation instead of vanishing before the fade completes.
+function useLingering(value) {
+  const [held, setHeld] = useState(value);
+  useEffect(() => {
+    if (value != null) setHeld(value);
+  }, [value]);
+  return value ?? held;
+}
+
+// Flashes green/red briefly when `value` changes (up vs down), then settles back to
+// the neutral text color — used on the price quote so a poll tick is visible, not
+// just a silent DOM swap.
+function usePriceFlash(value) {
+  const [flash, setFlash] = useState(null); // "up" | "down" | null
+  const prevRef = useRef(value);
+  useEffect(() => {
+    if (value == null || prevRef.current == null) {
+      prevRef.current = value;
+      return;
+    }
+    if (value !== prevRef.current) {
+      setFlash(value > prevRef.current ? "up" : "down");
+      prevRef.current = value;
+      const t = setTimeout(() => setFlash(null), 600);
+      return () => clearTimeout(t);
+    }
+  }, [value]);
+  return flash;
+}
+
 const CASH_START = 10000;
 const POLL_DEFAULT = 5; // seconds
-const AUTO_REFETCH_MS = 5 * 60 * 1000; // how often to pull fresh Robinhood data for the active symbol
+const AUTO_REFETCH_MS = 5 * 60 * 1000; // how often to pull a fresh snapshot for the active symbol
 const K_INDICATORS = "qqq-sim-indicators"; // chart-layout pref, deliberately global (not per-symbol)
 const K_RECENT = "sim-recent-symbols";
 const LEGACY_K_PORTFOLIO = "qqq-sim-portfolio"; // pre-multi-symbol key, migrated (copied) to sim-QQQ-portfolio
@@ -34,9 +67,9 @@ function candlesFor(snapshot, interval) {
 const fmt$ = (n) => (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtPct = (n) => (n > 0 ? "+" : "") + n.toFixed(2) + "%";
 
-// Data comes from Robinhood via an MCP connection only Claude (Desktop/Code) can
-// authenticate to. This app never calls Robinhood or Anthropic itself — it just
-// polls a local JSON snapshot that Claude refreshes with POST /api/snapshot.
+// Data comes from a JSON snapshot the server fetches directly from Tradier's API and
+// writes to disk. This app never calls a market-data provider itself — it just polls
+// that snapshot via GET /api/snapshot.
 async function fetchSnapshot(symbol) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
@@ -62,7 +95,7 @@ export default function App() {
   const [searchInput, setSearchInput] = useState("");
   const [searchError, setSearchError] = useState(null);
   const [recentSymbols, setRecentSymbols] = useState(() => loadKey(K_RECENT, []));
-  const [noData, setNoData] = useState(false); // snapshot 404 — awaiting a Claude refresh for this symbol
+  const [noData, setNoData] = useState(false); // snapshot 404 — awaiting a refresh for this symbol
   const [cash, setCash] = useState(CASH_START);
   const [positions, setPositions] = useState([]); // {id, type: 'call'|'put', strike, expiration, qty, entryPrice}
   const [trades, setTrades] = useState([]);
@@ -212,7 +245,10 @@ export default function App() {
 
   const pullSnapshot = useCallback(async () => {
     if (!symbol) return;
-    setChainLoading(true);
+    // only show the loading placeholder when there's nothing cached yet (first load /
+    // symbol switch) — routine polls that already have a chain on screen should update
+    // it in place instead of unmounting the table every cycle
+    if (Object.keys(chainsRef.current).length === 0) setChainLoading(true);
     try {
       const snap = await fetchSnapshot(symbol);
       if (symbolRef.current !== symbol) return; // user switched symbols while this pull was in flight
@@ -288,7 +324,7 @@ export default function App() {
 
   // fetch one expiration's chain (server-enriched with computed greeks/IV) when the
   // user picks a date — fresher than whatever the last snapshot poll cached, and the
-  // 404 copy tells them to ask Claude for expirations the snapshot doesn't cover yet
+  // 404 copy tells them to refresh for expirations the snapshot doesn't cover yet
   const fetchChain = useCallback(async (expiration) => {
     if (!symbol || !expiration) return;
     setChainLoading(true);
@@ -337,7 +373,7 @@ export default function App() {
   }, [polling, intervalSec, pullSnapshot]);
 
   // switch every panel to a new symbol; the server-side active symbol is kept in
-  // sync so "refresh the simulator" tells Claude which one to fetch
+  // sync so a refresh with no ?symbol= targets the right one
   const selectSymbol = useCallback((raw) => {
     const sym = String(raw || "").trim().toUpperCase();
     if (!SYMBOL_RE.test(sym)) {
@@ -354,7 +390,7 @@ export default function App() {
     if (sym === symbolRef.current) return;
     setSymbol(sym);
     // fire-and-forget: data endpoints get ?symbol= explicitly, so a failed PUT only
-    // affects which symbol Claude refreshes by default
+    // affects which symbol gets refreshed by default
     fetch(`${SERVER_URL}/api/symbol`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -362,26 +398,22 @@ export default function App() {
     }).catch(() => {});
   }, []);
 
-  // "Go" calls this to actually pull fresh Robinhood data: POSTs a refresh request the
-  // local launchd watcher picks up (it runs the refresh-snapshot skill headlessly and
-  // reports progress back), then tracks that progress for the loading banner below.
+  // "Go" calls this to pull a fresh snapshot: POSTs a refresh request, which the
+  // server fetches directly from Tradier in-process (a few seconds).
   const triggerRefresh = useCallback(async (sym) => {
     try {
       const res = await fetch(`${SERVER_URL}/api/refresh?symbol=${sym}`, { method: "POST" });
       const data = await res.json().catch(() => null);
       if (!data) return;
       if (res.status === 409) {
-        if (data.status?.status === "pending" || data.status?.status === "running") {
-          setRefreshStatus(data.status); // already in flight — track its real progress
+        if (data.status?.status === "running") {
+          setRefreshStatus(data.status); // already in flight — track its real status
         } else {
           const secs = data.retryAfterMs ? Math.ceil(data.retryAfterMs / 1000) : null;
           setRefreshStatus({
             symbol: sym,
             status: "cooldown",
-            step: 0,
-            totalSteps: 1,
             message: secs ? `Refreshed ${sym} recently — try again in ${secs}s` : `Refreshed ${sym} recently — try again shortly`,
-            error: null,
           });
         }
       } else if (res.ok) {
@@ -392,20 +424,7 @@ export default function App() {
     }
   }, [setRefreshStatus]);
 
-  // "Cancel" in the refresh banner — only works while still queued (server 409s once
-  // the watcher has claimed it and it's "running"), since there's no way to stop a
-  // headless process already in flight.
-  const cancelRefreshRequest = useCallback(async () => {
-    if (!symbol) return;
-    try {
-      const res = await fetch(`${SERVER_URL}/api/refresh?symbol=${symbol}`, { method: "DELETE" });
-      if (res.ok) clearRefreshStatus();
-    } catch {
-      // best-effort — leave the banner as-is if the request itself failed
-    }
-  }, [symbol, clearRefreshStatus]);
-
-  // "Reset snapshot" — deletes the symbol's fetched Robinhood data server-side (so
+  // "Reset snapshot" — deletes the symbol's fetched snapshot server-side (so
   // the next refresh starts clean instead of layering onto stale strikes/candles)
   // and clears everything derived from it locally, same fields the symbol-switch
   // effect above resets. Confirms first since this discards real fetched data.
@@ -442,7 +461,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshStatus?.status, refreshStatus?.updatedAt]);
 
-  // keep the active symbol's real Robinhood data from going stale — separate from
+  // keep the active symbol's fetched snapshot from going stale — separate from
   // the 5s/30s/etc "Poll every" cadence above, which only re-reads the last snapshot
   // already on disk. requestRefresh's 15s server-side cooldown makes this safe even
   // if the user also clicks "Fetch snapshot" manually around the same time.
@@ -499,6 +518,8 @@ export default function App() {
   const totalValue = cash + positionsValue;
   const totalPnl = totalValue - CASH_START;
   const up = quote && quote.change >= 0;
+  const priceFlash = usePriceFlash(quote?.price);
+  const buyTargetDisplay = useLingering(buyTarget);
 
   return (
     <div className="wrap">
@@ -510,11 +531,17 @@ export default function App() {
         .red { color:#FF5C5C; }
         .amber { color:#E8A33D; }
         .card { background:#14171A; border:1px solid #22262B; border-radius:10px; padding:16px; }
+        .module { margin-bottom:24px; }
+        .module:last-child { margin-bottom:0; }
+        .module-header { margin-bottom:10px; }
         .row { display:flex; align-items:center; gap:10px; }
         .header { display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:16px; margin-bottom:18px; }
-        .dot { width:8px; height:8px; border-radius:50%; background:#3DDC84; box-shadow:0 0 8px #3DDC84; }
-        .dot.off { background:#565C63; box-shadow:none; }
-        .price-big { font-size:40px; font-weight:600; letter-spacing:-0.5px; }
+        .dot { width:8px; height:8px; border-radius:50%; background:#3DDC84; box-shadow:0 0 8px #3DDC84; animation: dot-pulse 2s ease-in-out infinite; }
+        .dot.off { background:#565C63; box-shadow:none; animation:none; }
+        @keyframes dot-pulse { 0%, 100% { opacity:1; } 50% { opacity:.45; } }
+        .price-big { font-size:40px; font-weight:600; letter-spacing:-0.5px; transition: color .5s ease; }
+        .price-big.flash-up { color:#3DDC84; transition: color 60ms ease; }
+        .price-big.flash-down { color:#FF5C5C; transition: color 60ms ease; }
         .grid { display:grid; grid-template-columns: 1.1fr 1fr; gap:16px; }
         @media (max-width:860px) { .grid { grid-template-columns: 1fr; } }
         table { width:100%; border-collapse:collapse; font-size:13px; }
@@ -549,6 +576,10 @@ export default function App() {
         .pane-card-title { font-size:11px; letter-spacing:.6px; text-transform:uppercase; color:#8A9099; font-family: ui-monospace, "SF Mono", "IBM Plex Mono", Menlo, monospace; }
         .drag-handle { cursor:grab; color:#565C63; font-size:13px; line-height:1; padding:2px; user-select:none; }
         .drag-handle:active { cursor:grabbing; }
+        .chart-tooltip { background:#14171A; border:1px solid #22262B; border-radius:8px; padding:8px 10px; font-size:11px; line-height:1.6; box-shadow:0 4px 14px rgba(0,0,0,.45); min-width:150px; }
+        .chart-tooltip-date { font-size:10px; margin-bottom:4px; }
+        .chart-tooltip-row { display:flex; gap:6px; flex-wrap:wrap; }
+        .chart-tooltip-indicators { margin-top:6px; padding-top:6px; border-top:1px solid #1E2227; display:flex; flex-direction:column; gap:2px; }
         .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.6); display:flex; align-items:center; justify-content:center; z-index:10; }
         .modal { background:#14171A; border:1px solid #2A2F35; border-radius:10px; padding:20px; width:280px; }
         .modal.help { width:420px; max-width:92vw; max-height:82vh; overflow-y:auto; }
@@ -565,6 +596,10 @@ export default function App() {
         .summary p { margin:4px 0 0; font-size:13px; line-height:1.6; color:#C9CDD1; }
         .summary .sub { font-weight:600; color:#E7E9EA; font-size:13px; margin-top:12px; }
         .trade-log { max-height:220px; overflow-y:auto; }
+        @media (prefers-reduced-motion: reduce) {
+          .dot { animation:none; }
+          .price-big, .price-big.flash-up, .price-big.flash-down { transition:none; }
+        }
       `}</style>
 
       <ActiveRefreshesList serverUrl={SERVER_URL} />
@@ -573,7 +608,7 @@ export default function App() {
         <div>
           <div className="row">
             <span className={`dot ${polling ? "" : "off"}`} />
-            <span className="section-title" style={{ margin: 0 }}>{symbol ?? "…"} paper trading &middot; live via Robinhood</span>
+            <span className="section-title" style={{ margin: 0 }}>{symbol ?? "…"} paper trading &middot; live market data</span>
             <form
               className="row"
               style={{ gap: 6 }}
@@ -595,7 +630,7 @@ export default function App() {
                   if (searchError) setSearchError(null);
                 }}
               />
-              <button type="submit" className="ghost" title="Fetch fresh data from Robinhood for this symbol">Go</button>
+              <button type="submit" className="ghost" title="Fetch fresh market data for this symbol">Go</button>
             </form>
           </div>
           {searchError && <div style={{ color: "#FF9B9B", fontSize: 12, marginTop: 4 }}>{searchError}</div>}
@@ -613,19 +648,30 @@ export default function App() {
               ))}
             </div>
           )}
-          {quote ? (
-            <div className="row" style={{ marginTop: 6 }}>
-              <span className="price-big mono">{fmt$(quote.price)}</span>
-              <span className={`mono ${up ? "green" : "red"}`}>{fmtPct(quote.changePct)} ({up ? "+" : ""}{quote.change.toFixed(2)})</span>
-            </div>
-          ) : (
-            <div className="muted" style={{ marginTop: 10 }}>{noData ? "No data yet." : "Loading quote…"}</div>
-          )}
-          {quote && <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>as of {new Date(quote.asOf).toLocaleTimeString()}</div>}
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={symbol}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18, ease: "easeOut" }}
+            >
+              {quote ? (
+                <div className="row" style={{ marginTop: 6 }}>
+                  <span className={`price-big mono ${priceFlash === "up" ? "flash-up" : priceFlash === "down" ? "flash-down" : ""}`}>{fmt$(quote.price)}</span>
+                  <span className={`mono ${up ? "green" : "red"}`}>{fmtPct(quote.changePct)} ({up ? "+" : ""}{quote.change.toFixed(2)})</span>
+                </div>
+              ) : (
+                <div className="muted" style={{ marginTop: 10 }}>{noData ? "No data yet." : "Loading quote…"}</div>
+              )}
+              {quote && <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>as of {new Date(quote.asOf).toLocaleTimeString()}</div>}
+            </motion.div>
+          </AnimatePresence>
         </div>
 
-        <div className="card" style={{ minWidth: 220 }}>
-          <div className="section-title">Simulated account</div>
+        <div className="module" style={{ minWidth: 220, marginBottom: 0 }}>
+          <div className="module-header"><div className="section-title" style={{ margin: 0 }}>Simulated account</div></div>
+          <div className="card">
           <div className="row" style={{ justifyContent: "space-between" }}>
             <span className="muted">Cash</span><span className="mono">{fmt$(cash)}</span>
           </div>
@@ -640,6 +686,7 @@ export default function App() {
             <span className="muted">Since start</span>
             <span className={`mono ${totalPnl >= 0 ? "green" : "red"}`}>{fmt$(totalPnl)}</span>
           </div>
+          </div>
         </div>
       </div>
 
@@ -647,10 +694,10 @@ export default function App() {
         <div className="card" style={{ marginBottom: 16, textAlign: "center", padding: 40 }}>
           <div className="section-title" style={{ marginBottom: 6 }}>No symbol selected</div>
           <div className="muted" style={{ fontSize: 13 }}>
-            Search for a stock or ETF above and click &ldquo;Go&rdquo; to fetch live data via Robinhood and start paper trading.
+            Search for a stock or ETF above and click &ldquo;Go&rdquo; to fetch live market data and start paper trading.
           </div>
           <div className="row" style={{ justifyContent: "center", marginTop: 16 }}>
-            <IndicatorToggles active={activeInd} onToggle={toggleIndicator} onHelp={setHelpKey} disabled={false} />
+            <IndicatorToggles active={activeInd} onToggle={toggleIndicator} onHelp={setHelpKey} disabled={false} interval={candleInterval} />
           </div>
           <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
             Pick which indicators to track now — only the ones checked here get fetched once you select a symbol.
@@ -660,7 +707,7 @@ export default function App() {
 
       {symbol && (
         <>
-      {refreshStatus && <RefreshProgressBanner status={refreshStatus} onDismiss={clearRefreshStatus} onCancel={cancelRefreshRequest} />}
+      {refreshStatus && <RefreshProgressBanner status={refreshStatus} onDismiss={clearRefreshStatus} />}
 
       {error && <div className="err">{error}</div>}
 
@@ -668,16 +715,16 @@ export default function App() {
         <div className="card" style={{ marginBottom: 16, textAlign: "center", padding: 28 }}>
           <div className="section-title" style={{ marginBottom: 6 }}>No data for {symbol} yet</div>
           <div className="muted" style={{ fontSize: 13 }}>
-            Ask Claude to refresh {symbol} — e.g. &ldquo;refresh {symbol} in the simulator&rdquo;. This page keeps polling and will
+            Click &ldquo;Go&rdquo; above to fetch live data for {symbol}. This page keeps polling and will
             pick the data up automatically.
           </div>
         </div>
       )}
 
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div className="row" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+      <div className="module">
+        <div className="module-header row" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
           <div className="section-title" style={{ margin: 0 }}>Price</div>
-          <IndicatorToggles active={activeInd} onToggle={toggleIndicator} onHelp={setHelpKey} disabled={false} iv={indicators?.iv} />
+          <IndicatorToggles active={activeInd} onToggle={toggleIndicator} onHelp={setHelpKey} disabled={false} iv={indicators?.iv} interval={candleInterval} />
           <div className="row">
             <RefetchStatus secondsLeft={polling ? secondsLeft : null} status={fetchStatus} />
             <label className="muted" style={{ fontSize: 12 }}>Interval</label>
@@ -693,7 +740,7 @@ export default function App() {
             </select>
             <button className="ghost" onClick={() => setPolling((p) => !p)}>{polling ? "Pause" : "Resume"}</button>
             <button className="ghost" onClick={pullSnapshot}>Refresh now</button>
-            <button className="ghost" title="Fetch fresh data from Robinhood for this symbol" onClick={() => symbol && triggerRefresh(symbol)} disabled={!symbol}>
+            <button className="ghost" title="Fetch fresh market data for this symbol" onClick={() => symbol && triggerRefresh(symbol)} disabled={!symbol}>
               Fetch snapshot
             </button>
             <button className="ghost" title="Delete this symbol's fetched data and start over" onClick={resetSnapshot} disabled={!symbol}>
@@ -701,12 +748,12 @@ export default function App() {
             </button>
           </div>
         </div>
-        <div style={{ marginTop: 10 }}>
+        <div className="card">
           {candles.length ? (
             <Candlestick bars={candles} height={280} series={indicators?.series} active={activeInd} interval={candleInterval} />
           ) : (
             <div className="muted" style={{ padding: 20, textAlign: "center" }}>
-              No {candleInterval} candles yet for {symbol ?? "this symbol"} — ask Claude to refresh it.
+              No {candleInterval} candles yet for {symbol ?? "this symbol"} — click &ldquo;Go&rdquo; to refresh it.
             </div>
           )}
         </div>
@@ -714,8 +761,8 @@ export default function App() {
 
       <SummaryPanel quote={quote} greeks={greeksData} signal={signalData} symbol={symbol} />
 
-      <div className="section-title" style={{ margin: 20 }}>Option chain</div>
-      <div className="grid">
+      <div className="module-header"><div className="section-title" style={{ margin: "0 0 10px" }}>Option chain</div></div>
+      <div className="grid module">
         <div className="card">
           <div className="row" style={{ justifyContent: "space-between" }}>
             <select
@@ -734,7 +781,7 @@ export default function App() {
           {chainLoading && <div className="muted" style={{ marginTop: 10 }}>Loading chain…</div>}
           {!chainLoading && selectedExp && !chainsRef.current[selectedExp] && (
             <div className="muted" style={{ marginTop: 10, fontSize: 12 }}>
-              No data yet for {selectedExp}.{chain ? " Showing last loaded expiration below." : " Ask Claude to refresh."}
+              No data yet for {selectedExp}.{chain ? " Showing last loaded expiration below." : " Click “Go” to refresh."}
             </div>
           )}
           {chain && !chainLoading && (() => {
@@ -766,9 +813,10 @@ export default function App() {
                 </thead>
                 <tbody>
                   {view.strikes.map((s) => (
-                    <tr
+                    <motion.tr
                       key={s.strike}
-                      style={pickOf(s.strike) ? { background: "rgba(76,141,255,.07)" } : undefined}
+                      animate={{ backgroundColor: pickOf(s.strike) ? "rgba(76,141,255,.07)" : "rgba(76,141,255,0)" }}
+                      transition={{ duration: 0.25, ease: "easeOut" }}
                       title={pickOf(s.strike) ? `autopilot ${pickOf(s.strike)} pick (${preview[pickOf(s.strike)].mode})` : undefined}
                     >
                       {hasGreeks && <td className="mono" title={sideTip(s.call)}>{s.call?.delta != null ? s.call.delta.toFixed(2) : "–"}</td>}
@@ -784,7 +832,7 @@ export default function App() {
                           <button className="sell" onClick={() => setBuyTarget({ type: "put", strike: s.strike, price: (s.put.bid + s.put.ask) / 2 })}>P</button>
                         </div>
                       </td>
-                    </tr>
+                    </motion.tr>
                   ))}
                 </tbody>
               </table>
@@ -792,27 +840,37 @@ export default function App() {
           })()}
         </div>
 
-        <div className="card">
-          <div className="section-title">Open positions</div>
+        <div>
+          <div className="module-header"><div className="section-title" style={{ margin: 0 }}>Open positions</div></div>
+          <div className="card">
           {positions.length === 0 && <div className="muted">No open positions.</div>}
           {positions.length > 0 && (
             <table>
               <thead><tr><th>Contract</th><th>Qty</th><th>Entry</th><th>Mark</th><th>P&amp;L</th><th></th></tr></thead>
               <tbody>
-                {positions.map((p) => {
-                  const mark = p.mark ?? p.entryPrice;
-                  const pnl = (mark - p.entryPrice) * 100 * p.qty;
-                  return (
-                    <tr key={p.id}>
-                      <td className="mono">{p.symbol ?? symbol} {p.strike}{p.type === "call" ? "C" : "P"} {p.expiration}</td>
-                      <td className="mono">{p.qty}</td>
-                      <td className="mono">{p.entryPrice.toFixed(2)}</td>
-                      <td className="mono">{mark.toFixed(2)}</td>
-                      <td className={`mono ${pnl >= 0 ? "green" : "red"}`}>{fmt$(pnl)}</td>
-                      <td><button className="ghost" onClick={() => closePosition(p)}>Close</button></td>
-                    </tr>
-                  );
-                })}
+                <AnimatePresence initial={false}>
+                  {positions.map((p) => {
+                    const mark = p.mark ?? p.entryPrice;
+                    const pnl = (mark - p.entryPrice) * 100 * p.qty;
+                    return (
+                      <motion.tr
+                        key={p.id}
+                        layout
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ duration: 0.2, ease: "easeOut" }}
+                      >
+                        <td className="mono">{p.symbol ?? symbol} {p.strike}{p.type === "call" ? "C" : "P"} {p.expiration}</td>
+                        <td className="mono">{p.qty}</td>
+                        <td className="mono">{p.entryPrice.toFixed(2)}</td>
+                        <td className="mono">{mark.toFixed(2)}</td>
+                        <td className={`mono ${pnl >= 0 ? "green" : "red"}`}>{fmt$(pnl)}</td>
+                        <td><button className="ghost" onClick={() => closePosition(p)}>Close</button></td>
+                      </motion.tr>
+                    );
+                  })}
+                </AnimatePresence>
               </tbody>
             </table>
           )}
@@ -820,22 +878,36 @@ export default function App() {
           <div className="section-title" style={{ marginTop: 18 }}>Trade log</div>
           <div className="trade-log">
             {trades.length === 0 && <div className="muted">No trades yet.</div>}
-            {trades.map((t, i) => (
-              <div key={i} className="mono" style={{ fontSize: 12, padding: "4px 0", borderBottom: "1px solid #1A1D21" }}>
-                <span className={t.action === "BUY" ? "green" : "red"}>{t.action}</span> {t.qty}x {t.symbol ?? symbol} {t.strike}{t.type === "call" ? "C" : "P"} {t.expiration} @ {(t.action === "BUY" ? t.entryPrice : t.closePrice).toFixed(2)}
-                <span className="muted"> &middot; {new Date(t.at).toLocaleTimeString()}</span>
-              </div>
-            ))}
+            <AnimatePresence initial={false}>
+              {trades.map((t) => (
+                <motion.div
+                  key={`${t.id}-${t.action}`}
+                  layout
+                  initial={{ opacity: 0, y: -6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.2, ease: "easeOut" }}
+                  className="mono"
+                  style={{ fontSize: 12, padding: "4px 0", borderBottom: "1px solid #1A1D21" }}
+                >
+                  <span className={t.action === "BUY" ? "green" : "red"}>{t.action}</span> {t.qty}x {t.symbol ?? symbol} {t.strike}{t.type === "call" ? "C" : "P"} {t.expiration} @ {(t.action === "BUY" ? t.entryPrice : t.closePrice).toFixed(2)}
+                  <span className="muted"> &middot; {new Date(t.at).toLocaleTimeString()}</span>
+                </motion.div>
+              ))}
+            </AnimatePresence>
+          </div>
           </div>
         </div>
       </div>
 
-      <div className="grid" style={{ marginTop: 16 }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div className="grid" style={{ marginTop: 24 }}>
+        <div>
           <AutopilotPanel symbol={symbol} />
           <GreeksPanel greeks={greeksData} signal={signalData} error={greeksError} secondsLeft={polling ? secondsLeft : null} status={greeksStatus} />
+          <VolSurfacePanel signal={signalData} error={greeksError} />
+          <GammaExposurePanel signal={signalData} error={greeksError} />
         </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        <div>
           <IndicatorsPanel data={indicators} error={indError} secondsLeft={polling ? secondsLeft : null} status={indStatus} active={activeInd} />
           <NewsPanel symbol={symbol} />
           <DivergencePanel signal={signalData} error={greeksError} />
@@ -848,29 +920,29 @@ export default function App() {
         </>
       )}
 
-      {buyTarget && (
-        <div className="modal-bg" onClick={() => setBuyTarget(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <Modal open={!!buyTarget} onClose={() => setBuyTarget(null)}>
+        {buyTargetDisplay && (
+          <>
             <div className="section-title">Buy to open</div>
             <div style={{ marginBottom: 10 }}>
-              {symbol} {buyTarget.strike}{buyTarget.type === "call" ? "C" : "P"} {selectedExp}
-              <div className="mono muted">mid {buyTarget.price.toFixed(2)}</div>
+              {symbol} {buyTargetDisplay.strike}{buyTargetDisplay.type === "call" ? "C" : "P"} {selectedExp}
+              <div className="mono muted">mid {buyTargetDisplay.price.toFixed(2)}</div>
             </div>
             <label className="muted" style={{ fontSize: 12 }}>Contracts</label>
             <input type="number" min={1} value={buyQty} onChange={(e) => setBuyQty(Math.max(1, Number(e.target.value)))} style={{ width: "100%", marginTop: 4, marginBottom: 12 }} />
             <div className="row" style={{ justifyContent: "space-between", marginBottom: 14 }}>
               <span className="muted">Cost</span>
-              <span className="mono">{fmt$(buyTarget.price * 100 * buyQty)}</span>
+              <span className="mono">{fmt$(buyTargetDisplay.price * 100 * buyQty)}</span>
             </div>
             <div className="row" style={{ justifyContent: "flex-end" }}>
               <button className="ghost" onClick={() => setBuyTarget(null)}>Cancel</button>
               <button className="buy" onClick={confirmBuy}>Confirm</button>
             </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </Modal>
 
-      {helpKey && <IndicatorHelpModal helpKey={helpKey} onClose={() => setHelpKey(null)} />}
+      <IndicatorHelpModal helpKey={helpKey} onClose={() => setHelpKey(null)} />
     </div>
   );
 }

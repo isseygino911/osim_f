@@ -1,6 +1,5 @@
 import { INDICATORS } from "./indicatorConfig.js";
 
-const PRICE = INDICATORS.filter((c) => c.pane === "price");
 const PANES = INDICATORS.filter((c) => c.pane !== "price");
 
 function Chip({ cfg, on, disabled, onToggle, onHelp }) {
@@ -26,7 +25,10 @@ function Chip({ cfg, on, disabled, onToggle, onHelp }) {
 // active: array of indicator keys currently drawn. onToggle(key) flips one. onHelp(key)
 // opens the explainer modal for that indicator — not gated by `disabled`, since it's
 // useful to read about an indicator before any candle data has loaded.
-export default function IndicatorToggles({ active = [], onToggle, onHelp, disabled = false, iv = null }) {
+// interval: VWAP is a session-based indicator and degenerates to a no-op on daily bars
+// (see indicators.service.js), so its chip is hidden entirely when interval === "1d".
+export default function IndicatorToggles({ active = [], onToggle, onHelp, disabled = false, iv = null, interval = "1d" }) {
+  const price = INDICATORS.filter((c) => c.pane === "price" && (c.key !== "vwap" || interval !== "1d"));
   const render = (cfg) => (
     <Chip key={cfg.key} cfg={cfg} on={active.includes(cfg.key)} disabled={disabled} onToggle={onToggle} onHelp={onHelp} />
   );
@@ -35,7 +37,7 @@ export default function IndicatorToggles({ active = [], onToggle, onHelp, disabl
 
   return (
     <div className="chip-row" title={disabled ? "Not enough candle data for indicators yet" : undefined}>
-      {PRICE.map(render)}
+      {price.map(render)}
       <span className="chip-sep" />
       {PANES.map(render)}
       {ivLabel && (

@@ -14,19 +14,17 @@ export default function SummaryPanel({ quote, greeks, signal, symbol = "QQQ" }) 
 
   if (!market && !quality && decision.length === 0) {
     return (
-      <div>
-        <div className="section-title">What&rsquo;s happening (plain English)</div>
-        <div className="muted">Waiting for data — start the server and ask Claude to refresh a snapshot.</div>
-    
-        <div className="muted">Waiting for data — start the server and ask Claude to refresh a snapshot.</div>
+      <div className="module">
+        <div className="module-header"><div className="section-title" style={{ margin: 0 }}>What&rsquo;s happening (plain English)</div></div>
+        <div className="card"><div className="muted">Waiting for data — start the server and click &ldquo;Go&rdquo; to fetch a snapshot.</div></div>
       </div>
     );
   }
 
   return (
-    <div>
-        <div className="section-title">What&rsquo;s happening (plain English)</div>
-        <div className="card summary" style={{ marginBottom: 16 }}>
+    <div className="module">
+        <div className="module-header"><div className="section-title" style={{ margin: 0 }}>What&rsquo;s happening (plain English)</div></div>
+        <div className="card summary">
 
         {market && (
           <>

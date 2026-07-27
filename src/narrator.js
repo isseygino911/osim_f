@@ -5,7 +5,7 @@
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 const fmt$ = (n) => (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const signed = (n) => (n > 0 ? "+" : "") + n.toFixed(1);
+const signed = (n) => (Number.isFinite(n) ? (n > 0 ? "+" : "") + n.toFixed(1) : "0.0");
 
 // "2026-07-31" → "Jul 31" (string math, so no timezone off-by-one)
 function expLabel(exp) {

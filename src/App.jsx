@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import Candlestick from "./Candlestick.jsx";
 import IndicatorHelpModal from "./IndicatorHelpModal.jsx";
@@ -68,13 +68,38 @@ const CANDLE_RANGES = [
 const CANDLE_RANGE_DEFAULT = "1m";
 const INTRADAY_ONLY_RANGES = new Set(["1d", "1w", "1m"]); // ranges an intraday interval can actually cover
 
-// Trims a candle array to the last `days` of data. Candles are already sorted
-// oldest-first (as returned by the server), so this is a simple cutoff-timestamp filter.
+// Finds the first index whose bar falls within the last `days` of data. Candles are
+// already sorted oldest-first (as returned by the server). Returns an index, not a
+// filtered array, because indicator series (computed server-side over the FULL
+// history) are positionally aligned to the full candle array — slicing candles and
+// series independently (e.g. by a timestamp filter on each separately) would desync
+// them the moment their lengths differ, which is exactly what produced the "jumping
+// lines" bug: overlays rendered against the wrong bar entirely.
+function rangeStartIndex(bars, days) {
+  if (!Array.isArray(bars) || !bars.length) return 0;
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  const idx = bars.findIndex((b) => new Date(b.t).getTime() >= cutoff);
+  if (idx === -1) return Math.max(0, bars.length - 1); // whole array is older than cutoff — keep just the last bar
+  return idx;
+}
+
+// Slices a candle array to the last `days` of data.
 function sliceByRange(bars, days) {
   if (!Array.isArray(bars) || !bars.length) return bars;
-  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-  const sliced = bars.filter((b) => new Date(b.t).getTime() >= cutoff);
-  return sliced.length ? sliced : bars.slice(-1); // never go fully empty if the range is tighter than the bar spacing
+  return bars.slice(rangeStartIndex(bars, days));
+}
+
+// Slices every array in an indicator `series` object by the same start index used to
+// slice `bars`, so overlays stay positionally aligned to the candles they're drawn
+// against — see rangeStartIndex's comment for why this can't be done independently.
+function sliceSeriesByRange(series, bars, days) {
+  if (!series || !Array.isArray(bars) || !bars.length) return series;
+  const start = rangeStartIndex(bars, days);
+  const out = {};
+  for (const [key, values] of Object.entries(series)) {
+    out[key] = Array.isArray(values) ? values.slice(start) : values;
+  }
+  return out;
 }
 
 const portfolioKey = (symbol) => `sim-${symbol}-portfolio`;
@@ -87,12 +112,8 @@ function candlesFor(snapshot, interval) {
   return c?.[interval] || [];
 }
 
-// Combines interval selection + date-range trimming — the one place both the initial
-// snapshot pull and the interval/range <select> re-slice effects should go through, so
-// they can never drift out of sync with each other.
-function candlesForView(snapshot, interval, rangeKey) {
-  const range = CANDLE_RANGES.find((r) => r.key === rangeKey) ?? CANDLE_RANGES.find((r) => r.key === CANDLE_RANGE_DEFAULT);
-  return sliceByRange(candlesFor(snapshot, interval), range.days);
+function rangeDays(rangeKey) {
+  return (CANDLE_RANGES.find((r) => r.key === rangeKey) ?? CANDLE_RANGES.find((r) => r.key === CANDLE_RANGE_DEFAULT)).days;
 }
 
 const fmt$ = (n) => (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -159,7 +180,6 @@ export default function App() {
   const lastSnapshotRef = useRef(null); // raw snapshot from the last successful pull, for re-slicing candles on interval change
   const selectedExpRef = useRef(selectedExp); // always-current mirror of selectedExp for async closures below
   const candleIntervalRef = useRef(candleInterval); // always-current mirror of candleInterval for pullSnapshot's async closure
-  const candleRangeRef = useRef(candleRange); // always-current mirror of candleRange for pullSnapshot's async closure
   const symbolRef = useRef(symbol); // always-current symbol so in-flight pulls for a switched-away symbol get dropped
   symbolRef.current = symbol;
   const { status: refreshStatus, setStatus: setRefreshStatus, clear: clearRefreshStatus } = useRefreshStatusPoll(symbol, SERVER_URL);
@@ -276,13 +296,15 @@ export default function App() {
     if (!INTRADAY_ONLY_RANGES.has(candleRange) && candleInterval !== "1d") setCandleInterval("1d");
   }, [candleRange, candleInterval]);
 
-  // re-slice candles from the last snapshot pull when the user switches interval or
-  // date range — no need to refetch the whole snapshot, it already carries every interval
+  // re-slice candles from the last snapshot pull when the user switches interval —
+  // no need to refetch the whole snapshot, it already carries every interval. `candles`
+  // deliberately stays the FULL (unsliced) interval history here — date-range trimming
+  // happens once, at render time, applied identically to candles and indicator series
+  // together (see the chartBars/chartSeries useMemo below) so the two can never desync.
   useEffect(() => {
     candleIntervalRef.current = candleInterval;
-    candleRangeRef.current = candleRange;
-    if (lastSnapshotRef.current) setCandles(candlesForView(lastSnapshotRef.current, candleInterval, candleRange));
-  }, [candleInterval, candleRange]);
+    if (lastSnapshotRef.current) setCandles(candlesFor(lastSnapshotRef.current, candleInterval));
+  }, [candleInterval]);
 
   const pullSnapshot = useCallback(async () => {
     if (!symbol) return;
@@ -308,7 +330,7 @@ export default function App() {
 
       if (snap.candles) {
         lastSnapshotRef.current = snap;
-        setCandles(candlesForView(snap, candleIntervalRef.current, candleRangeRef.current));
+        setCandles(candlesFor(snap, candleIntervalRef.current));
       }
 
       const exps = snap.expirations || [];
@@ -549,6 +571,15 @@ export default function App() {
     setTrades([]);
     if (symbol) saveKey(portfolioKey(symbol), { cash: CASH_START, positions: [], trades: [] });
   }
+
+  // Date-range trimming happens here, once, applied identically to candles and every
+  // indicator series array — both `candles` and `indicators.series` are positionally
+  // aligned to the FULL (unsliced) interval history, so they must be sliced by the same
+  // start index or overlays render against the wrong bar (the original bug: slicing
+  // candles alone left indicator series full-length, desyncing the two arrays).
+  const days = rangeDays(candleRange);
+  const chartBars = useMemo(() => sliceByRange(candles, days), [candles, days]);
+  const chartSeries = useMemo(() => sliceSeriesByRange(indicators?.series, candles, days), [indicators, candles, days]);
 
   const secondsLeft = useCountdown(polling ? intervalSec * 1000 : null, lastFetchAt);
   const fetchStatus = lastFetchOk == null ? null : lastFetchOk ? "success" : "error";
@@ -807,8 +838,8 @@ export default function App() {
           </div>
         </div>
         <div className="card">
-          {candles.length ? (
-            <Candlestick bars={candles} height={280} series={indicators?.series} active={activeInd} interval={candleInterval} />
+          {chartBars.length ? (
+            <Candlestick bars={chartBars} height={280} series={chartSeries} active={activeInd} interval={candleInterval} />
           ) : (
             <div className="muted" style={{ padding: 20, textAlign: "center" }}>
               No {candleInterval} candles yet for {symbol ?? "this symbol"} — click &ldquo;Go&rdquo; to refresh it.

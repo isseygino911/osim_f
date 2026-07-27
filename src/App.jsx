@@ -51,8 +51,31 @@ const LEGACY_K_PORTFOLIO = "qqq-sim-portfolio"; // pre-multi-symbol key, migrate
 const RECENT_CAP = 8;
 const SYMBOL_RE = /^[A-Z]{1,6}(\.[A-Z]{1,2})?$/; // mirrors the server's stocks/ETFs-only rule
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:8787";
-const CANDLE_INTERVALS = ["15m", "30m", "1h", "1d"];
+const CANDLE_INTERVALS = ["5m", "15m", "30m", "1h", "4h", "1d"];
 const CANDLE_INTERVAL_DEFAULT = "1d";
+
+// Date-range options for the chart. Tradier's intraday timesales endpoint rejects any
+// lookback older than ~2 months (empirically confirmed), so "3m"/"1y" can only ever be
+// served from daily candles — any intraday interval is force-switched to "1d" when one
+// of those two ranges is picked (see the range <select> below).
+const CANDLE_RANGES = [
+  { key: "1d", label: "1D", days: 1 },
+  { key: "1w", label: "1W", days: 7 },
+  { key: "1m", label: "1M", days: 30 },
+  { key: "3m", label: "3M", days: 90 },
+  { key: "1y", label: "1Y", days: 365 },
+];
+const CANDLE_RANGE_DEFAULT = "1m";
+const INTRADAY_ONLY_RANGES = new Set(["1d", "1w", "1m"]); // ranges an intraday interval can actually cover
+
+// Trims a candle array to the last `days` of data. Candles are already sorted
+// oldest-first (as returned by the server), so this is a simple cutoff-timestamp filter.
+function sliceByRange(bars, days) {
+  if (!Array.isArray(bars) || !bars.length) return bars;
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  const sliced = bars.filter((b) => new Date(b.t).getTime() >= cutoff);
+  return sliced.length ? sliced : bars.slice(-1); // never go fully empty if the range is tighter than the bar spacing
+}
 
 const portfolioKey = (symbol) => `sim-${symbol}-portfolio`;
 
@@ -62,6 +85,14 @@ function candlesFor(snapshot, interval) {
   const c = snapshot?.candles;
   if (Array.isArray(c)) return interval === "1d" ? c : [];
   return c?.[interval] || [];
+}
+
+// Combines interval selection + date-range trimming — the one place both the initial
+// snapshot pull and the interval/range <select> re-slice effects should go through, so
+// they can never drift out of sync with each other.
+function candlesForView(snapshot, interval, rangeKey) {
+  const range = CANDLE_RANGES.find((r) => r.key === rangeKey) ?? CANDLE_RANGES.find((r) => r.key === CANDLE_RANGE_DEFAULT);
+  return sliceByRange(candlesFor(snapshot, interval), range.days);
 }
 
 const fmt$ = (n) => (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -101,6 +132,7 @@ export default function App() {
   const [trades, setTrades] = useState([]);
   const [candles, setCandles] = useState([]); // {t, open, high, low, close, volume}
   const [candleInterval, setCandleInterval] = useState(CANDLE_INTERVAL_DEFAULT);
+  const [candleRange, setCandleRange] = useState(CANDLE_RANGE_DEFAULT);
   const [quote, setQuote] = useState(null); // {price, change, changePct, asOf}
   const [expirations, setExpirations] = useState([]);
   const [selectedExp, setSelectedExp] = useState(null);
@@ -127,6 +159,7 @@ export default function App() {
   const lastSnapshotRef = useRef(null); // raw snapshot from the last successful pull, for re-slicing candles on interval change
   const selectedExpRef = useRef(selectedExp); // always-current mirror of selectedExp for async closures below
   const candleIntervalRef = useRef(candleInterval); // always-current mirror of candleInterval for pullSnapshot's async closure
+  const candleRangeRef = useRef(candleRange); // always-current mirror of candleRange for pullSnapshot's async closure
   const symbolRef = useRef(symbol); // always-current symbol so in-flight pulls for a switched-away symbol get dropped
   symbolRef.current = symbol;
   const { status: refreshStatus, setStatus: setRefreshStatus, clear: clearRefreshStatus } = useRefreshStatusPoll(symbol, SERVER_URL);
@@ -236,12 +269,20 @@ export default function App() {
     selectedExpRef.current = selectedExp;
   }, [selectedExp]);
 
-  // re-slice candles from the last snapshot pull when the user switches interval —
-  // no need to refetch the whole snapshot, it already carries every interval
+  // 3m/1y ranges exceed Tradier's ~2-month intraday lookback cap — force the interval
+  // to daily candles whenever one of those ranges is picked, since that's the only data
+  // that can actually cover them (see CANDLE_RANGES' comment above).
+  useEffect(() => {
+    if (!INTRADAY_ONLY_RANGES.has(candleRange) && candleInterval !== "1d") setCandleInterval("1d");
+  }, [candleRange, candleInterval]);
+
+  // re-slice candles from the last snapshot pull when the user switches interval or
+  // date range — no need to refetch the whole snapshot, it already carries every interval
   useEffect(() => {
     candleIntervalRef.current = candleInterval;
-    if (lastSnapshotRef.current) setCandles(candlesFor(lastSnapshotRef.current, candleInterval));
-  }, [candleInterval]);
+    candleRangeRef.current = candleRange;
+    if (lastSnapshotRef.current) setCandles(candlesForView(lastSnapshotRef.current, candleInterval, candleRange));
+  }, [candleInterval, candleRange]);
 
   const pullSnapshot = useCallback(async () => {
     if (!symbol) return;
@@ -267,7 +308,7 @@ export default function App() {
 
       if (snap.candles) {
         lastSnapshotRef.current = snap;
-        setCandles(candlesFor(snap, candleIntervalRef.current));
+        setCandles(candlesForView(snap, candleIntervalRef.current, candleRangeRef.current));
       }
 
       const exps = snap.expirations || [];
@@ -727,8 +768,25 @@ export default function App() {
           <IndicatorToggles active={activeInd} onToggle={toggleIndicator} onHelp={setHelpKey} disabled={false} iv={indicators?.iv} interval={candleInterval} />
           <div className="row">
             <RefetchStatus secondsLeft={polling ? secondsLeft : null} status={fetchStatus} />
+            <div className="chip-row" title="Date range">
+              {CANDLE_RANGES.map((r) => (
+                <button
+                  key={r.key}
+                  className={`chip ${r.key === candleRange ? "on" : ""}`}
+                  style={r.key === candleRange ? { background: "#4C8DFF", borderColor: "#4C8DFF" } : undefined}
+                  onClick={() => setCandleRange(r.key)}
+                >
+                  {r.label}
+                </button>
+              ))}
+            </div>
             <label className="muted" style={{ fontSize: 12 }}>Interval</label>
-            <select value={candleInterval} onChange={(e) => setCandleInterval(e.target.value)}>
+            <select
+              value={candleInterval}
+              onChange={(e) => setCandleInterval(e.target.value)}
+              disabled={!INTRADAY_ONLY_RANGES.has(candleRange)}
+              title={!INTRADAY_ONLY_RANGES.has(candleRange) ? "3M/1Y history is only available as daily candles" : undefined}
+            >
               {CANDLE_INTERVALS.map((iv) => <option key={iv} value={iv}>{iv}</option>)}
             </select>
             <label className="muted" style={{ fontSize: 12 }}>Poll every</label>

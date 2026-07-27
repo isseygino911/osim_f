@@ -89,6 +89,12 @@ export function narrateDecision(signal, preview, symbol = "QQQ") {
   sentences.push(
     `Chart indicators lean ${lean(signal.techScore)} (${signed(signal.techScore)}) and news sentiment is ${lean(signal.newsScore)} (${signed(signal.newsScore)}). Blended — 75% chart, 25% news — that's a raw score of ${signed(base)}.`
   );
+  const drivers = signal.indicators?.composite?.topDrivers;
+  if (drivers?.length > 0) {
+    const top = drivers.slice(0, 2);
+    const parts = top.map((d) => `${d.indicator} is ${d.direction} (${d.why.charAt(0).toLowerCase()}${d.why.slice(1).replace(/\.$/, "")})`);
+    sentences.push(`Biggest drivers of that chart lean: ${parts.join("; ")}.`);
+  }
   if ((signal.optionsScore ?? 0) < 0 && Math.abs(base - signal.combinedScore) >= 0.05) {
     sentences.push(
       `Because option conditions are working against buyers right now, the app shrank that score to ${signed(signal.combinedScore)}.`

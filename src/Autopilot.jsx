@@ -59,6 +59,7 @@ export function IndicatorsPanel({ data, error, secondsLeft, status, active = nul
   }
 
   const { latest, composite, iv } = data;
+  const dirClass = (d) => (d === "bullish" ? "green" : d === "bearish" ? "red" : "muted");
   const allRows = [
     ["rsi", "RSI (14)", latest.rsi14?.toFixed(1), Number.isFinite(latest.rsi14) && latest.rsi14 < 30 ? "green" : Number.isFinite(latest.rsi14) && latest.rsi14 > 70 ? "red" : ""],
     ["macd", "MACD", latest.macd?.toFixed(2), latest.macd > latest.macdSignal ? "green" : "red"],
@@ -102,6 +103,24 @@ export function IndicatorsPanel({ data, error, secondsLeft, status, active = nul
           </tbody>
         </table>
       </div>
+      {composite.reasons?.length > 0 && (
+        <div className="card" style={{ marginTop: 8 }}>
+          <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
+            Why {composite.label.replace("_", " ").toUpperCase()}: each indicator&rsquo;s vote
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 4 }}>
+            {composite.reasons.map((r) => (
+              <li key={r.indicator} style={{ fontSize: 12 }}>
+                <span className={dirClass(r.direction)} style={{ fontWeight: 600 }}>{r.indicator}</span>
+                {" "}
+                <span className={dirClass(r.direction)}>({r.direction}{r.direction !== "neutral" ? `, ${r.vote > 0 ? "+" : ""}${r.vote}` : ""})</span>
+                {" — "}
+                <span className="muted">{r.why}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }

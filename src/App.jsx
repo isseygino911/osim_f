@@ -11,6 +11,27 @@ import SummaryPanel from "./SummaryPanel.jsx";
 import { useCountdown, RefetchStatus } from "./RefetchStatus.jsx";
 import { useRefreshStatusPoll, ActiveRefreshesList, RefreshProgressBanner } from "./RefreshProgress.jsx";
 
+// Collapsible section for the lower-priority "deep analytics" panels (vol surface,
+// gamma exposure, divergence) — collapsed by default so the page doesn't force a
+// scroll past dense tables most users only check occasionally.
+function CollapsibleSection({ title, subtitle, defaultOpen = false, children }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="module">
+      <button
+        className="ghost collapsible-header"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+      >
+        <span className="collapsible-caret">{open ? "▾" : "▸"}</span>
+        <span className="section-title" style={{ margin: 0 }}>{title}</span>
+        {subtitle && <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>{subtitle}</span>}
+      </button>
+      {open && <div style={{ marginTop: 10 }}>{children}</div>}
+    </div>
+  );
+}
+
 // Keeps rendering the last non-null value while `value` is null, so a modal's content
 // stays on screen during its exit animation instead of vanishing before the fade completes.
 function useLingering(value) {
@@ -668,6 +689,9 @@ export default function App() {
         .summary p { margin:4px 0 0; font-size:13px; line-height:1.6; color:#C9CDD1; }
         .summary .sub { font-weight:600; color:#E7E9EA; font-size:13px; margin-top:12px; }
         .trade-log { max-height:220px; overflow-y:auto; }
+        .collapsible-header { display:flex; align-items:center; gap:8px; width:100%; justify-content:flex-start; background:transparent; border:none; padding:6px 0; }
+        .collapsible-header:hover .section-title { color:#C9CDD1; }
+        .collapsible-caret { color:#8A9099; font-size:11px; width:10px; }
         @media (prefers-reduced-motion: reduce) {
           .dot { animation:none; }
           .price-big, .price-big.flash-up, .price-big.flash-down { transition:none; }
@@ -999,19 +1023,31 @@ export default function App() {
         </div>
       </div>
 
+      <div style={{ marginTop: 24 }}>
+        <AutopilotPanel symbol={symbol} />
+      </div>
+
       <div className="grid" style={{ marginTop: 24 }}>
         <div>
-          <AutopilotPanel symbol={symbol} />
-          <GreeksPanel greeks={greeksData} signal={signalData} error={greeksError} secondsLeft={polling ? secondsLeft : null} status={greeksStatus} />
-          <VolSurfacePanel signal={signalData} error={greeksError} />
-          <GammaExposurePanel signal={signalData} error={greeksError} />
+          <IndicatorsPanel data={indicators} error={indError} secondsLeft={polling ? secondsLeft : null} status={indStatus} active={activeInd} />
         </div>
         <div>
-          <IndicatorsPanel data={indicators} error={indError} secondsLeft={polling ? secondsLeft : null} status={indStatus} active={activeInd} />
           <NewsPanel symbol={symbol} />
-          <DivergencePanel signal={signalData} error={greeksError} />
         </div>
       </div>
+
+      <CollapsibleSection title="Advanced analytics" subtitle="Greeks · volatility surface · gamma exposure · news vs. options">
+        <div className="grid">
+          <div>
+            <GreeksPanel greeks={greeksData} signal={signalData} error={greeksError} secondsLeft={polling ? secondsLeft : null} status={greeksStatus} />
+            <VolSurfacePanel signal={signalData} error={greeksError} />
+          </div>
+          <div>
+            <DivergencePanel signal={signalData} error={greeksError} />
+            <GammaExposurePanel signal={signalData} error={greeksError} />
+          </div>
+        </div>
+      </CollapsibleSection>
 
       <div className="row" style={{ marginTop: 16, justifyContent: "flex-end" }}>
         <button className="ghost" onClick={resetSim}>Reset simulator (manual paper account)</button>

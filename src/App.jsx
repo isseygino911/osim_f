@@ -144,8 +144,8 @@ function usePriceFlash(value) {
 }
 
 const CASH_START = 10000;
-const POLL_DEFAULT = 5; // seconds
-const AUTO_REFETCH_MS = 5 * 60 * 1000; // how often to pull a fresh snapshot for the active symbol
+const POLL_DEFAULT = 180; // seconds; matches the server's 3min snapshot auto-refresh cadence
+const AUTO_REFETCH_MS = 3 * 60 * 1000; // matches the server's AUTO_REFRESH_INTERVAL_MS (refresh.service.js)
 const K_INDICATORS = "qqq-sim-indicators"; // chart-layout pref, deliberately global (not per-symbol)
 const K_RECENT = "sim-recent-symbols";
 const LEGACY_K_PORTFOLIO = "qqq-sim-portfolio"; // pre-multi-symbol key, migrated (copied) to sim-QQQ-portfolio
@@ -695,9 +695,9 @@ export default function App() {
   }, [refreshStatus?.status, refreshStatus?.updatedAt]);
 
   // keep the active symbol's fetched snapshot from going stale — separate from
-  // the 5s/30s/etc "Poll every" cadence above, which only re-reads the last snapshot
+  // the 3m/5m/10m "Poll every" cadence above, which only re-reads the last snapshot
   // already on disk. requestRefresh's 15s server-side cooldown makes this safe even
-  // if the user also clicks "Fetch snapshot" manually around the same time.
+  // if the user also clicks "Fetch live data" manually around the same time.
   useEffect(() => {
     if (!symbol) return;
     const id = setInterval(() => triggerRefresh(symbol), AUTO_REFETCH_MS);
@@ -1382,17 +1382,15 @@ export default function App() {
             <div className="row" style={{ justifyContent: "space-between", marginTop: 14 }}>
               <label className="muted" style={{ fontSize: 12 }}>Poll every</label>
               <select value={intervalSec} onChange={(e) => setIntervalSec(Number(e.target.value))}>
-                <option value={5}>5s</option>
-                <option value={30}>30s</option>
-                <option value={60}>60s</option>
-                <option value={120}>2m</option>
+                <option value={180}>3m</option>
+                <option value={300}>5m</option>
+                <option value={600}>10m</option>
               </select>
               <button className="ghost" onClick={() => setPolling((p) => !p)}>{polling ? "Pause" : "Resume"}</button>
             </div>
             <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid var(--border-pane)", display: "flex", flexDirection: "column", gap: 8 }}>
-              <button className="ghost" style={{ width: "100%" }} onClick={pullSnapshot}>Refresh now</button>
               <button className="ghost" style={{ width: "100%" }} title="Fetch fresh market data for this symbol" onClick={() => symbol && triggerRefresh(symbol)} disabled={!symbol}>
-                Fetch snapshot
+                Fetch live data
               </button>
               <button className="ghost red" style={{ width: "100%", background: "transparent" }} title="Delete this symbol's fetched data and start over" onClick={resetSnapshot} disabled={!symbol}>
                 Reset snapshot
@@ -1575,17 +1573,15 @@ export default function App() {
               <div className="indicator-menu-group">
                 <div className="indicator-menu-group-title">Poll every</div>
                 <select style={{ width: "100%" }} value={intervalSec} onChange={(e) => setIntervalSec(Number(e.target.value))}>
-                  <option value={5}>5s</option>
-                  <option value={30}>30s</option>
-                  <option value={60}>60s</option>
-                  <option value={120}>2m</option>
+                  <option value={180}>3m</option>
+                  <option value={300}>5m</option>
+                  <option value={600}>10m</option>
                 </select>
               </div>
               <div className="indicator-menu-group" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 <button className="ghost" style={{ width: "100%" }} onClick={() => setPolling((p) => !p)}>{polling ? "Pause" : "Resume"}</button>
-                <button className="ghost" style={{ width: "100%" }} onClick={pullSnapshot}>Refresh now</button>
                 <button className="ghost" style={{ width: "100%" }} title="Fetch fresh market data for this symbol" onClick={() => symbol && triggerRefresh(symbol)} disabled={!symbol}>
-                  Fetch snapshot
+                  Fetch live data
                 </button>
                 <button className="ghost" style={{ width: "100%" }} title="Delete this symbol's fetched data and start over" onClick={resetSnapshot} disabled={!symbol}>
                   Reset snapshot

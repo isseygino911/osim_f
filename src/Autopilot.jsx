@@ -6,8 +6,8 @@ import NewsDetailDrawer from "./NewsDetailDrawer.jsx";
 import useMediaQuery from "./useMediaQuery.js";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:8787";
-const NEWS_POLL_MS = 2 * 60 * 1000;
-const AUTOPILOT_POLL_MS = 10 * 1000;
+const NEWS_POLL_MS = 10 * 60 * 1000; // matches the server's RAW_TTL_MS RSS cache (news.service.js)
+const AUTOPILOT_POLL_MS = 60 * 1000; // matches the server's autopilot decision tick (LOOP_INTERVAL_MS)
 const fmt$ = (n) => (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtPct = (n) => (n > 0 ? "+" : "") + n.toFixed(2) + "%";
 // gemini-2.5-flash-lite Developer API standard tier, $/token (ai.google.dev/gemini-api/docs/pricing)
@@ -624,18 +624,6 @@ export function AutopilotPanel({ symbol = "QQQ" }) {
     }
   }
 
-  async function runNow() {
-    setBusy(true);
-    try {
-      await api(`/api/autopilot/run-now?symbol=${symbol}`, { method: "POST" });
-      await refresh();
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function reset() {
     if (!window.confirm(`Reset the ${symbol} autopilot portfolio to $10,000 and clear all history?`)) return;
     setBusy(true);
@@ -672,7 +660,6 @@ export function AutopilotPanel({ symbol = "QQQ" }) {
           <RefetchStatus secondsLeft={secondsLeft} status={fetchStatus} />
         </div>
         <div className="row" style={{ justifyContent: "flex-end" }}>
-          <button className="ghost small" onClick={runNow} disabled={busy}>Run now</button>
           <button className={`small ${status.enabled ? "sell" : "buy"}`} onClick={toggle} disabled={busy}>
             {status.enabled ? "Stop" : "Start"}
           </button>

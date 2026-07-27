@@ -1,10 +1,11 @@
 import { narrateMarket, narrateOptions, narrateDecision } from "./narrator.js";
+import { RefetchStatus } from "./RefetchStatus.jsx";
 
 const TONE_CLS = { good: "green", caution: "amber", poor: "red", muted: "muted" };
 
 // Beginner-facing translation of the numbers shown elsewhere on the page.
 // Purely presentational — App.jsx owns the snapshot/greeks/signal fetches.
-export default function SummaryPanel({ quote, greeks, signal, symbol = "QQQ", isMobile = false }) {
+export default function SummaryPanel({ quote, greeks, signal, symbol = "QQQ", isMobile = false, secondsLeft = null, status = null, updatedAt = null }) {
   const market = narrateMarket(quote, symbol);
   const exp = signal?.optionsFactors?.expiration ?? greeks?.preview?.expiration ?? null;
   const quality = exp ? greeks?.summary?.[exp] : null;
@@ -15,7 +16,10 @@ export default function SummaryPanel({ quote, greeks, signal, symbol = "QQQ", is
   if (!market && !quality && decision.length === 0) {
     return (
       <div className="module">
-        <div className="module-header"><div className="section-title" style={{ margin: 0 }}>What&rsquo;s happening (plain English)</div></div>
+        <div className="module-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div className="section-title" style={{ margin: 0 }}>What&rsquo;s happening (plain English)</div>
+          <RefetchStatus secondsLeft={secondsLeft} status={status} updatedAt={updatedAt} />
+        </div>
         <div className={isMobile ? undefined : "card"} style={isMobile ? { margin: 5 } : undefined}><div className="muted">Waiting for data — start the server and click &ldquo;Go&rdquo; to fetch a snapshot.</div></div>
       </div>
     );
@@ -23,7 +27,10 @@ export default function SummaryPanel({ quote, greeks, signal, symbol = "QQQ", is
 
   return (
     <div className="module">
-        <div className="module-header"><div className="section-title" style={{ margin: 0 }}>What&rsquo;s happening (plain English)</div></div>
+        <div className="module-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div className="section-title" style={{ margin: 0 }}>What&rsquo;s happening (plain English)</div>
+          <RefetchStatus secondsLeft={secondsLeft} status={status} updatedAt={updatedAt} />
+        </div>
         <div className={isMobile ? "summary" : "card summary"} style={isMobile ? { margin: 5 } : undefined}>
 
         {market && (

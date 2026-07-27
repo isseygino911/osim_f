@@ -16,7 +16,7 @@ import useMediaQuery from "./useMediaQuery.js";
 // gamma exposure, divergence) — collapsed by default so the page doesn't force a
 // scroll past dense tables most users only check occasionally. Exported so the mobile
 // Signal tab's "Advanced analytics" accordion can reuse it (see App()).
-export function CollapsibleSection({ title, subtitle, defaultOpen = false, children }) {
+export function CollapsibleSection({ title, subtitle, defaultOpen = false, children, secondsLeft = null, status = null, updatedAt = null }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
     <div className="module">
@@ -24,10 +24,14 @@ export function CollapsibleSection({ title, subtitle, defaultOpen = false, child
         className="ghost collapsible-header"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
+        style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}
       >
-        <span className="collapsible-caret">{open ? "▾" : "▸"}</span>
-        <span className="collapsible-title">{title}</span>
-        {subtitle && <span className="muted collapsible-subtitle">{subtitle}</span>}
+        <span>
+          <span className="collapsible-caret">{open ? "▾" : "▸"}</span>
+          <span className="collapsible-title">{title}</span>
+          {subtitle && <span className="muted collapsible-subtitle">{subtitle}</span>}
+        </span>
+        <RefetchStatus secondsLeft={secondsLeft} status={status} updatedAt={updatedAt} />
       </button>
       {open && <div style={{ marginTop: 10 }}>{children}</div>}
     </div>
@@ -338,6 +342,9 @@ export default function App() {
   const symbolRef = useRef(symbol); // always-current symbol so in-flight pulls for a switched-away symbol get dropped
   symbolRef.current = symbol;
   const { status: refreshStatus, setStatus: setRefreshStatus, clear: clearRefreshStatus } = useRefreshStatusPoll(symbol, SERVER_URL);
+  // bumped by triggerRefresh so NewsPanel force-refreshes as part of one "Refresh all" action —
+  // there's no other automatic news poll anymore (see Autopilot.jsx's commented-out NEWS_POLL_MS interval).
+  const [newsRefreshToken, setNewsRefreshToken] = useState(0);
 
   // mobile shell state — see the design spec (§4) for the 767px/1023px breakpoints
   const isMobile = useMediaQuery("(max-width: 767px)");
@@ -598,12 +605,12 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol]);
 
-  // polling loop
-  useEffect(() => {
-    if (pollRef.current) clearInterval(pollRef.current);
-    if (polling) pollRef.current = setInterval(pullSnapshot, intervalSec * 1000);
-    return () => clearInterval(pollRef.current);
-  }, [polling, intervalSec, pullSnapshot]);
+  // Auto-polling loop disabled for now — data only refreshes on "Go"/"Refresh all" clicks.
+  // Was: useEffect(() => {
+  //   if (pollRef.current) clearInterval(pollRef.current);
+  //   if (polling) pollRef.current = setInterval(pullSnapshot, intervalSec * 1000);
+  //   return () => clearInterval(pollRef.current);
+  // }, [polling, intervalSec, pullSnapshot]);
 
   // switch every panel to a new symbol; the server-side active symbol is kept in
   // sync so a refresh with no ?symbol= targets the right one
@@ -631,9 +638,32 @@ export default function App() {
     }).catch(() => {});
   }, []);
 
-  // "Go" calls this to pull a fresh snapshot: POSTs a refresh request, which the
-  // server fetches directly from Tradier in-process (a few seconds).
+  // Only one symbol's worth of data should exist at a time — wipe every OTHER
+  // symbol's snapshot + autopilot portfolio before fetching a new one, so switching
+  // symbols never leaves stale sets sitting around on disk.
+  const clearOtherSymbols = useCallback(async (keepSymbol) => {
+    try {
+      const res = await fetch(`${SERVER_URL}/api/symbols`);
+      const data = await res.json().catch(() => null);
+      const others = (data?.symbols ?? []).map((s) => s.symbol).filter((s) => s !== keepSymbol);
+      await Promise.all(
+        others.flatMap((s) => [
+          fetch(`${SERVER_URL}/api/snapshot?symbol=${s}`, { method: "DELETE" }).catch(() => {}),
+          fetch(`${SERVER_URL}/api/autopilot?symbol=${s}`, { method: "DELETE" }).catch(() => {}),
+        ])
+      );
+    } catch {
+      // best-effort — a failed cleanup shouldn't block fetching the symbol the user actually asked for
+    }
+  }, []);
+
+  // "Go" and "Refresh all" both call this — the one action that updates everything:
+  // clear any other symbol's data (see clearOtherSymbols above), then a real Tradier
+  // fetch for this symbol + snapshot/indicators/greeks/signal/chain (via the
+  // refreshStatus "done" effect below) + news (bumping newsRefreshToken forces NewsPanel
+  // to refetch even though its own automatic poll is disabled).
   const triggerRefresh = useCallback(async (sym) => {
+    await clearOtherSymbols(sym);
     try {
       const res = await fetch(`${SERVER_URL}/api/refresh?symbol=${sym}`, { method: "POST" });
       const data = await res.json().catch(() => null);
@@ -651,11 +681,12 @@ export default function App() {
         }
       } else if (res.ok) {
         setRefreshStatus(data);
+        setNewsRefreshToken((n) => n + 1);
       }
     } catch {
-      // network error requesting a refresh — the regular snapshot poll still works normally
+      // network error requesting a refresh — there's no background poll to fall back on anymore
     }
-  }, [setRefreshStatus]);
+  }, [setRefreshStatus, clearOtherSymbols]);
 
   // "Reset snapshot" — deletes the symbol's fetched snapshot server-side (so
   // the next refresh starts clean instead of layering onto stale strikes/candles)
@@ -686,7 +717,7 @@ export default function App() {
   }, [symbol, clearRefreshStatus]);
 
   // once a refresh finishes, pull the fresh snapshot immediately instead of waiting
-  // for the next 5s poll tick
+  // for the next scheduled "Poll every" tick
   useEffect(() => {
     if (refreshStatus?.status === "done" && refreshStatus?.symbol === symbol) {
       pullSnapshot();
@@ -694,15 +725,13 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshStatus?.status, refreshStatus?.updatedAt]);
 
-  // keep the active symbol's fetched snapshot from going stale — separate from
-  // the 3m/5m/10m "Poll every" cadence above, which only re-reads the last snapshot
-  // already on disk. requestRefresh's 15s server-side cooldown makes this safe even
-  // if the user also clicks "Fetch live data" manually around the same time.
-  useEffect(() => {
-    if (!symbol) return;
-    const id = setInterval(() => triggerRefresh(symbol), AUTO_REFETCH_MS);
-    return () => clearInterval(id);
-  }, [symbol, triggerRefresh]);
+  // Background auto-refetch disabled for now — the active symbol's snapshot only
+  // updates via an explicit "Go"/"Refresh all" click (triggerRefresh).
+  // Was: useEffect(() => {
+  //   if (!symbol) return;
+  //   const id = setInterval(() => triggerRefresh(symbol), AUTO_REFETCH_MS);
+  //   return () => clearInterval(id);
+  // }, [symbol, triggerRefresh]);
 
   function confirmBuy() {
     if (!buyTarget || buyQty < 1) return;
@@ -1105,18 +1134,7 @@ export default function App() {
             <span className={`m-price mono ${priceFlash === "up" ? "flash-up" : priceFlash === "down" ? "flash-down" : ""}`}>
               {quote ? fmt$(quote.price) : "—"}
             </span>
-            <button
-              type="button"
-              className="m-account-btn"
-              onClick={() => setMAccountOpen(true)}
-              title="Account"
-              aria-label="Account"
-            >
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="8" r="3.5" />
-                <path d="M4.5 20c1.4-3.6 4.4-5.5 7.5-5.5s6.1 1.9 7.5 5.5" />
-              </svg>
-            </button>
+            {/* Trading disabled for now — account/positions button hidden from UI */}
           </div>
 
           {mSearchOpen && (
@@ -1227,7 +1245,7 @@ export default function App() {
                   )}
                 </div>
                 <div style={{ marginTop: 12 }}>
-                  <SummaryPanel quote={quote} greeks={greeksData} signal={signalData} symbol={symbol} isMobile />
+                  <SummaryPanel quote={quote} greeks={greeksData} signal={signalData} symbol={symbol} isMobile secondsLeft={null} updatedAt={lastFetchAt} status={fetchStatus} />
                 </div>
               </>
             )}
@@ -1266,64 +1284,39 @@ export default function App() {
                   )}
 
                   {view && !chainLoading && (
-                    <MobileChainTable view={view} hasGreeks={hasGreeks} pickOf={pickOf} preview={preview} spot={quote?.price} setBuyTarget={setBuyTarget} />
+                    <MobileChainTable view={view} hasGreeks={hasGreeks} pickOf={pickOf} preview={preview} spot={quote?.price} setBuyTarget={() => {}} />
                   )}
 
-                  <div className="module-header" style={{ marginTop: 20 }}><div className="section-title" style={{ margin: 0 }}>Open positions</div></div>
-                  {positions.length === 0 && <div className="muted">No open positions.</div>}
-                  {positions.map((p) => {
-                    const mark = p.mark ?? p.entryPrice;
-                    const pnl = (mark - p.entryPrice) * 100 * p.qty;
-                    return (
-                      <div key={p.id} className="m-position-card">
-                        <div className="m-position-line1">{p.symbol ?? symbol} {p.strike}{p.type === "call" ? "C" : "P"} {p.expiration}</div>
-                        <div className="m-position-line2">{p.qty}x @ {p.entryPrice.toFixed(2)}</div>
-                        <div className="m-position-row">
-                          <span className={`m-position-pnl ${pnl >= 0 ? "green" : "red"}`}>{fmt$(pnl)}</span>
-                          <button className="ghost" onClick={() => closePosition(p)}>Close</button>
-                        </div>
-                      </div>
-                    );
-                  })}
-
-                  <div className="subsection-title">Trade log</div>
-                  <div className="trade-log">
-                    {trades.length === 0 && <div className="muted">No trades yet.</div>}
-                    {trades.map((t) => (
-                      <div key={`${t.id}-${t.action}`} className="mono" style={{ fontSize: 12, padding: "4px 0", borderBottom: "1px solid #1A1D21" }}>
-                        <span className={t.action === "BUY" ? "m-buy-label" : "red"}>{t.action}</span> {t.qty}x {t.symbol ?? symbol} {t.strike}{t.type === "call" ? "C" : "P"} {t.expiration} @ {(t.action === "BUY" ? t.entryPrice : t.closePrice).toFixed(2)}
-                        <span className="muted"> &middot; {new Date(t.at).toLocaleTimeString()}</span>
-                      </div>
-                    ))}
-                  </div>
+                  {/* Trading disabled for now — Open positions / Trade log hidden from UI */}
                 </>
               );
             })()}
 
             {symbol && !noData && activeTab === "signal" && (
               <>
-                <AutopilotPanel symbol={symbol} />
+                {/* Trading disabled for now — Autopilot hidden from UI, see server refresh.service.js/autopilot.service.js AUTO_REFRESH_ENABLED/AUTOPILOT_LOOP_ENABLED */}
+                {/* <AutopilotPanel symbol={symbol} /> */}
                 <div style={{ marginTop: 20 }}>
-                  <IndicatorsPanel data={indicators} error={indError} secondsLeft={polling ? secondsLeft : null} status={indStatus} active={activeInd} />
+                  <IndicatorsPanel data={indicators} error={indError} secondsLeft={null} updatedAt={lastFetchAt} status={indStatus} active={activeInd} />
                 </div>
                 <div className="m-accordion-group" style={{ marginTop: 20 }}>
-                  <CollapsibleSection title="Greeks">
-                    <GreeksPanel greeks={greeksData} signal={signalData} error={greeksError} secondsLeft={polling ? secondsLeft : null} status={greeksStatus} hideHeader />
+                  <CollapsibleSection title="Greeks" secondsLeft={null} updatedAt={lastFetchAt} status={greeksStatus}>
+                    <GreeksPanel greeks={greeksData} signal={signalData} error={greeksError} secondsLeft={null} updatedAt={lastFetchAt} status={greeksStatus} hideHeader />
                   </CollapsibleSection>
-                  <CollapsibleSection title="News vs options">
+                  <CollapsibleSection title="News vs options" secondsLeft={null} updatedAt={lastFetchAt} status={greeksStatus}>
                     <DivergencePanel signal={signalData} error={greeksError} hideHeader />
                   </CollapsibleSection>
-                  <CollapsibleSection title="Volatility surface">
+                  <CollapsibleSection title="Volatility surface" secondsLeft={null} updatedAt={lastFetchAt} status={greeksStatus}>
                     <VolSurfacePanel signal={signalData} error={greeksError} hideHeader />
                   </CollapsibleSection>
-                  <CollapsibleSection title="Gamma exposure">
+                  <CollapsibleSection title="Gamma exposure" secondsLeft={null} updatedAt={lastFetchAt} status={greeksStatus}>
                     <GammaExposurePanel signal={signalData} error={greeksError} hideHeader />
                   </CollapsibleSection>
                 </div>
               </>
             )}
 
-            {symbol && !noData && activeTab === "news" && <NewsPanel symbol={symbol} compact fullHeight />}
+            {symbol && !noData && activeTab === "news" && <NewsPanel symbol={symbol} compact fullHeight refreshToken={newsRefreshToken} />}
           </div>
 
           <nav className="m-tabbar">
@@ -1340,26 +1333,7 @@ export default function App() {
             ))}
           </nav>
 
-          <Modal open={mAccountOpen} onClose={() => setMAccountOpen(false)} variant="sheet">
-            <div className="section-title">Simulated account</div>
-            <div className="row" style={{ justifyContent: "space-between", marginTop: 10 }}>
-              <span className="muted">Cash</span><span className="mono">{fmt$(cash)}</span>
-            </div>
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <span className="muted">Positions value</span><span className="mono">{fmt$(positionsValue)}</span>
-            </div>
-            <div className="row" style={{ justifyContent: "space-between", fontWeight: 600 }}>
-              <span>Total</span>
-              <span className={`mono ${totalPnl >= 0 ? "green" : "red"}`}>{fmt$(totalValue)}</span>
-            </div>
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <span className="muted">Since start</span>
-              <span className={`mono ${totalPnl >= 0 ? "green" : "red"}`}>{fmt$(totalPnl)}</span>
-            </div>
-            <div className="row" style={{ justifyContent: "flex-end", marginTop: 16 }}>
-              <button className="ghost" onClick={resetSim}>Reset simulator</button>
-            </div>
-          </Modal>
+          {/* Trading disabled for now — Simulated account sheet hidden from UI (its trigger button is also removed) */}
 
           <Modal open={mChartSettingsOpen} onClose={() => setMChartSettingsOpen(false)} variant="sheet">
             <div className="section-title">Chart settings</div>
@@ -1379,46 +1353,24 @@ export default function App() {
             </div>
             <div className="muted" style={{ fontSize: 12, marginTop: 14, marginBottom: 4 }}>Indicators</div>
             <IndicatorToggles active={activeInd} onToggle={toggleIndicator} onHelp={setHelpKey} disabled={false} iv={indicators?.iv} interval={candleInterval} />
-            <div className="row" style={{ justifyContent: "space-between", marginTop: 14 }}>
-              <label className="muted" style={{ fontSize: 12 }}>Poll every</label>
-              <select value={intervalSec} onChange={(e) => setIntervalSec(Number(e.target.value))}>
-                <option value={180}>3m</option>
-                <option value={300}>5m</option>
-                <option value={600}>10m</option>
-              </select>
-              <button className="ghost" onClick={() => setPolling((p) => !p)}>{polling ? "Pause" : "Resume"}</button>
-            </div>
+            {/* Auto-polling disabled for now — "Poll every"/Pause-Resume controls hidden from UI */}
             <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid var(--border-pane)", display: "flex", flexDirection: "column", gap: 8 }}>
-              <button className="ghost" style={{ width: "100%" }} title="Fetch fresh market data for this symbol" onClick={() => symbol && triggerRefresh(symbol)} disabled={!symbol}>
-                Fetch live data
+              <button
+                className="buy"
+                style={{ width: "100%", fontSize: 15, fontWeight: 700, padding: "12px 0" }}
+                title="Clear any other symbol's data and fetch fresh market data for this symbol"
+                onClick={() => symbol && triggerRefresh(symbol)}
+                disabled={!symbol}
+              >
+                Refresh all
               </button>
-              <button className="ghost red" style={{ width: "100%", background: "transparent" }} title="Delete this symbol's fetched data and start over" onClick={resetSnapshot} disabled={!symbol}>
-                Reset snapshot
-              </button>
+              {/* "Reset snapshot" disabled for now — Refresh all already clears any other symbol's
+                  data (see clearOtherSymbols in triggerRefresh) before fetching, so a separate manual
+                  wipe of the CURRENT symbol isn't needed for the "1 set of data" workflow. */}
             </div>
           </Modal>
 
-          <Modal open={!!buyTarget} onClose={() => setBuyTarget(null)} variant="sheet">
-            {buyTargetDisplay && (
-              <>
-                <div className="section-title">Buy to open</div>
-                <div style={{ marginBottom: 10 }}>
-                  {symbol} {buyTargetDisplay.strike}{buyTargetDisplay.type === "call" ? "C" : "P"} {selectedExp}
-                  <div className="mono muted">mid {buyTargetDisplay.price.toFixed(2)}</div>
-                </div>
-                <label className="muted" style={{ fontSize: 12 }}>Contracts</label>
-                <input type="number" min={1} value={buyQty} onChange={(e) => setBuyQty(Math.max(1, Number(e.target.value)))} style={{ width: "100%", marginTop: 4, marginBottom: 12 }} />
-                <div className="row" style={{ justifyContent: "space-between", marginBottom: 14 }}>
-                  <span className="muted">Cost</span>
-                  <span className="mono">{fmt$(buyTargetDisplay.price * 100 * buyQty)}</span>
-                </div>
-                <div className="row" style={{ justifyContent: "flex-end", position: "sticky", bottom: 0, background: "var(--bg-card)", paddingTop: 8 }}>
-                  <button className="ghost" onClick={() => setBuyTarget(null)}>Cancel</button>
-                  <button className="buy" onClick={confirmBuy}>Confirm</button>
-                </div>
-              </>
-            )}
-          </Modal>
+          {/* Trading disabled for now — Buy sheet hidden from UI (its triggers are all removed/no-op'd) */}
 
           <IndicatorHelpModal helpKey={helpKey} onClose={() => setHelpKey(null)} variant="sheet" />
         </>
@@ -1454,6 +1406,15 @@ export default function App() {
               />
               <button type="submit" className="ghost" title="Fetch fresh market data for this symbol">Go</button>
             </form>
+            <button
+              className="buy"
+              style={{ fontSize: 15, fontWeight: 700, padding: "10px 20px" }}
+              title="Clear any other symbol's data and fetch fresh market data for this symbol"
+              onClick={() => symbol && triggerRefresh(symbol)}
+              disabled={!symbol}
+            >
+              Refresh all
+            </button>
           </div>
           {searchError && <div style={{ color: "#FF9B9B", fontSize: 12, marginTop: 4 }}>{searchError}</div>}
           {recentSymbols.length > 0 && (
@@ -1491,8 +1452,13 @@ export default function App() {
           </AnimatePresence>
         </div>
 
+        {/* Trading disabled for now — Simulated account panel hidden from UI */}
+        {false && (
         <div className="module" style={{ minWidth: 220, marginBottom: 0 }}>
-          <div className="module-header"><div className="section-title" style={{ margin: 0 }}>Simulated account</div></div>
+          <div className="module-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div className="section-title" style={{ margin: 0 }}>Simulated account</div>
+            <RefetchStatus secondsLeft={null} updatedAt={lastFetchAt} status={fetchStatus} />
+          </div>
           <div className="card">
           <div className="row" style={{ justifyContent: "space-between" }}>
             <span className="muted">Cash</span><span className="mono">{fmt$(cash)}</span>
@@ -1510,6 +1476,7 @@ export default function App() {
           </div>
           </div>
         </div>
+        )}
       </div>
 
       {!symbol && (
@@ -1547,7 +1514,7 @@ export default function App() {
         <div className="module-header row" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
           <div className="section-title" style={{ margin: 0 }}>Price</div>
           <div className="row">
-            <RefetchStatus secondsLeft={polling ? secondsLeft : null} status={fetchStatus} />
+            <RefetchStatus secondsLeft={null} updatedAt={lastFetchAt} status={fetchStatus} />
             <div className="chip-row" title="Date range">
               {CANDLE_RANGES.map((r) => (
                 <button
@@ -1569,25 +1536,8 @@ export default function App() {
               {CANDLE_INTERVALS.map((iv) => <option key={iv} value={iv}>{iv}</option>)}
             </select>
             <IndicatorMenu active={activeInd} onToggle={toggleIndicator} onHelp={setHelpKey} disabled={false} iv={indicators?.iv} interval={candleInterval} align="right" />
-            <DropdownMenu label="Actions" panelWidth={240} align="right">
-              <div className="indicator-menu-group">
-                <div className="indicator-menu-group-title">Poll every</div>
-                <select style={{ width: "100%" }} value={intervalSec} onChange={(e) => setIntervalSec(Number(e.target.value))}>
-                  <option value={180}>3m</option>
-                  <option value={300}>5m</option>
-                  <option value={600}>10m</option>
-                </select>
-              </div>
-              <div className="indicator-menu-group" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                <button className="ghost" style={{ width: "100%" }} onClick={() => setPolling((p) => !p)}>{polling ? "Pause" : "Resume"}</button>
-                <button className="ghost" style={{ width: "100%" }} title="Fetch fresh market data for this symbol" onClick={() => symbol && triggerRefresh(symbol)} disabled={!symbol}>
-                  Fetch live data
-                </button>
-                <button className="ghost" style={{ width: "100%" }} title="Delete this symbol's fetched data and start over" onClick={resetSnapshot} disabled={!symbol}>
-                  Reset snapshot
-                </button>
-              </div>
-            </DropdownMenu>
+            {/* Auto-polling controls and Reset snapshot disabled for now — "Refresh all" (header, above)
+                is now the one prominent action; it already clears any other symbol's data first. */}
           </div>
         </div>
         <div className="card">
@@ -1601,7 +1551,7 @@ export default function App() {
         </div>
       </div>
 
-      <SummaryPanel quote={quote} greeks={greeksData} signal={signalData} symbol={symbol} />
+      <SummaryPanel quote={quote} greeks={greeksData} signal={signalData} symbol={symbol} secondsLeft={null} updatedAt={lastFetchAt} status={fetchStatus} />
 
       <div className="module">
       <div className="grid grid-stretch">
@@ -1657,7 +1607,6 @@ export default function App() {
                     <th>Call bid/ask</th><th>Strike</th><th>Put bid/ask</th>
                     {hasGreeks && <th>IV</th>}
                     {hasGreeks && <th>Δ</th>}
-                    <th></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1675,12 +1624,7 @@ export default function App() {
                       <td className="mono">{s.put.bid.toFixed(2)}/{s.put.ask.toFixed(2)}</td>
                       {hasGreeks && <td className="mono">{s.put?.iv != null ? (s.put.iv * 100).toFixed(0) + "%" : "–"}</td>}
                       {hasGreeks && <td className="mono" title={sideTip(s.put)}>{s.put?.delta != null ? s.put.delta.toFixed(2) : "–"}</td>}
-                      <td>
-                        <div className="row">
-                          <button className="buy" onClick={() => setBuyTarget({ type: "call", strike: s.strike, price: (s.call.bid + s.call.ask) / 2 })}>C</button>
-                          <button className="sell" onClick={() => setBuyTarget({ type: "put", strike: s.strike, price: (s.put.bid + s.put.ask) / 2 })}>P</button>
-                        </div>
-                      </td>
+                      {/* Trading disabled for now — Buy/Sell column hidden from UI */}
                     </motion.tr>
                   ))}
                 </tbody>
@@ -1690,8 +1634,13 @@ export default function App() {
           </div>
         </div>
 
+        {/* Trading disabled for now — Open positions / Trade log hidden from UI */}
+        {false && (
         <div>
-          <div className="module-header"><div className="section-title" style={{ margin: 0 }}>Open positions</div></div>
+          <div className="module-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div className="section-title" style={{ margin: 0 }}>Open positions</div>
+            <RefetchStatus secondsLeft={null} updatedAt={lastFetchAt} status={fetchStatus} />
+          </div>
           <div className="card">
           {positions.length === 0 && <div className="muted">No open positions.</div>}
           {positions.length > 0 && (
@@ -1748,61 +1697,38 @@ export default function App() {
           </div>
           </div>
         </div>
+        )}
+
+        <div>
+          <NewsPanel symbol={symbol} fullHeight refreshToken={newsRefreshToken} />
+        </div>
       </div>
       </div>
+
+      {/* Trading disabled for now — Autopilot hidden from UI, see server refresh.service.js/autopilot.service.js AUTO_REFRESH_ENABLED/AUTOPILOT_LOOP_ENABLED */}
+      {/* <div style={{ marginTop: 24 }}>
+        <AutopilotPanel symbol={symbol} />
+      </div> */}
 
       <div style={{ marginTop: 24 }}>
-        <AutopilotPanel symbol={symbol} />
-      </div>
-
-      <div className="grid" style={{ marginTop: 24 }}>
-        <div>
-          <IndicatorsPanel data={indicators} error={indError} secondsLeft={polling ? secondsLeft : null} status={indStatus} active={activeInd} />
-          <div style={{ marginTop: 24 }}>
-            <GreeksPanel greeks={greeksData} signal={signalData} error={greeksError} secondsLeft={polling ? secondsLeft : null} status={greeksStatus} />
-          </div>
-          <div style={{ marginTop: 24 }}>
-            <VolSurfacePanel signal={signalData} error={greeksError} />
-          </div>
-          <div style={{ marginTop: 24 }}>
-            <DivergencePanel signal={signalData} error={greeksError} />
-          </div>
-          <div style={{ marginTop: 24 }}>
-            <GammaExposurePanel signal={signalData} error={greeksError} />
-          </div>
+        <IndicatorsPanel data={indicators} error={indError} secondsLeft={null} updatedAt={lastFetchAt} status={indStatus} active={activeInd} />
+        <div style={{ marginTop: 24 }}>
+          <GreeksPanel greeks={greeksData} signal={signalData} error={greeksError} secondsLeft={null} updatedAt={lastFetchAt} status={greeksStatus} />
         </div>
-        <div>
-          <NewsPanel symbol={symbol} fullHeight />
+        <div style={{ marginTop: 24 }}>
+          <VolSurfacePanel signal={signalData} error={greeksError} secondsLeft={null} updatedAt={lastFetchAt} status={greeksStatus} />
+        </div>
+        <div style={{ marginTop: 24 }}>
+          <DivergencePanel signal={signalData} error={greeksError} secondsLeft={null} updatedAt={lastFetchAt} status={greeksStatus} />
+        </div>
+        <div style={{ marginTop: 24 }}>
+          <GammaExposurePanel signal={signalData} error={greeksError} secondsLeft={null} updatedAt={lastFetchAt} status={greeksStatus} />
         </div>
       </div>
 
-      <div className="row" style={{ marginTop: 16, justifyContent: "flex-end" }}>
-        <button className="ghost" onClick={resetSim}>Reset simulator (manual paper account)</button>
-      </div>
+      {/* Trading disabled for now — Reset simulator button and Buy sheet hidden from UI */}
         </>
       )}
-
-      <Modal open={!!buyTarget} onClose={() => setBuyTarget(null)}>
-        {buyTargetDisplay && (
-          <>
-            <div className="section-title">Buy to open</div>
-            <div style={{ marginBottom: 10 }}>
-              {symbol} {buyTargetDisplay.strike}{buyTargetDisplay.type === "call" ? "C" : "P"} {selectedExp}
-              <div className="mono muted">mid {buyTargetDisplay.price.toFixed(2)}</div>
-            </div>
-            <label className="muted" style={{ fontSize: 12 }}>Contracts</label>
-            <input type="number" min={1} value={buyQty} onChange={(e) => setBuyQty(Math.max(1, Number(e.target.value)))} style={{ width: "100%", marginTop: 4, marginBottom: 12 }} />
-            <div className="row" style={{ justifyContent: "space-between", marginBottom: 14 }}>
-              <span className="muted">Cost</span>
-              <span className="mono">{fmt$(buyTargetDisplay.price * 100 * buyQty)}</span>
-            </div>
-            <div className="row" style={{ justifyContent: "flex-end" }}>
-              <button className="ghost" onClick={() => setBuyTarget(null)}>Cancel</button>
-              <button className="buy" onClick={confirmBuy}>Confirm</button>
-            </div>
-          </>
-        )}
-      </Modal>
 
       <IndicatorHelpModal helpKey={helpKey} onClose={() => setHelpKey(null)} />
       </>

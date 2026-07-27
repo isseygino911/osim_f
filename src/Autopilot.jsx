@@ -31,13 +31,13 @@ function scoreColor(score) {
 
 // Presentational: App.jsx owns the /api/indicators fetch so the chart overlays
 // and this table share a single request per poll.
-export function IndicatorsPanel({ data, error, secondsLeft, status, active = null }) {
+export function IndicatorsPanel({ data, error, secondsLeft, status, active = null, updatedAt = null }) {
   if (error) {
     return (
       <div className="module">
         <div className="module-header row" style={{ justifyContent: "space-between" }}>
           <div className="section-title" style={{ margin: 0 }}>Indicators</div>
-          <RefetchStatus secondsLeft={secondsLeft} status={status} />
+          <RefetchStatus secondsLeft={secondsLeft} status={status} updatedAt={updatedAt} />
         </div>
         <div className="card">
           <div className="muted" style={{ fontSize: 12 }}>{error}</div>
@@ -50,7 +50,7 @@ export function IndicatorsPanel({ data, error, secondsLeft, status, active = nul
       <div className="module">
         <div className="module-header row" style={{ justifyContent: "space-between" }}>
           <div className="section-title" style={{ margin: 0 }}>Indicators</div>
-          <RefetchStatus secondsLeft={secondsLeft} status={status} />
+          <RefetchStatus secondsLeft={secondsLeft} status={status} updatedAt={updatedAt} />
         </div>
         <div className="card">
           <div className="muted">Loading…</div>
@@ -86,7 +86,7 @@ export function IndicatorsPanel({ data, error, secondsLeft, status, active = nul
       <div className="module-header row" style={{ justifyContent: "space-between" }}>
         <div className="section-title" style={{ margin: 0 }}>Indicators</div>
         <div className="row">
-          <RefetchStatus secondsLeft={secondsLeft} status={status} />
+          <RefetchStatus secondsLeft={secondsLeft} status={status} updatedAt={updatedAt} />
           <span className={`mono ${scoreColor(composite.score)}`} style={{ fontWeight: 600, fontSize: 13 }}>
             {composite.label.replace("_", " ").toUpperCase()} ({composite.score > 0 ? "+" : ""}{composite.score})
           </span>
@@ -126,7 +126,7 @@ export function IndicatorsPanel({ data, error, secondsLeft, status, active = nul
   );
 }
 
-export function NewsPanel({ symbol = "QQQ", fullHeight = false, compact = false }) {
+export function NewsPanel({ symbol = "QQQ", fullHeight = false, compact = false, refreshToken = 0 }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -166,16 +166,26 @@ export function NewsPanel({ symbol = "QQQ", fullHeight = false, compact = false 
   useEffect(() => {
     setData(null); // load's identity changes with the symbol — never show the old symbol's headlines
     load(false);
-    const t = setInterval(() => load(false), NEWS_POLL_MS);
-    return () => clearInterval(t);
+    // Auto-poll disabled for now — was: const t = setInterval(() => load(false), NEWS_POLL_MS); return () => clearInterval(t);
   }, [load]);
 
-  const secondsLeft = useCountdown(NEWS_POLL_MS, lastFetchAt);
+  // App.jsx's "Go"/"Refresh all" bumps this to force a live news refetch as part of
+  // the one manual refresh action, now that the automatic poll above is disabled.
+  const isFirstRefreshToken = useRef(true);
+  useEffect(() => {
+    if (isFirstRefreshToken.current) {
+      isFirstRefreshToken.current = false;
+      return;
+    }
+    load(true);
+  }, [refreshToken]);
+
   const status = lastFetchOk == null ? null : lastFetchOk ? "success" : "error";
 
   const headerRow = (
     <div className="row">
-      <RefetchStatus secondsLeft={secondsLeft} status={status} />
+      {/* No more auto-poll, so no countdown to show — just the status dot and last-updated time */}
+      <RefetchStatus secondsLeft={null} status={status} updatedAt={lastFetchAt} />
       {data?.analysisMode === "gemini" && (
         <span
           className="mono"
@@ -190,7 +200,7 @@ export function NewsPanel({ symbol = "QQQ", fullHeight = false, compact = false 
           {data.overall.sentiment.toUpperCase()} ({data.overall.score > 0 ? "+" : ""}{data.overall.score})
         </span>
       )}
-      <button className="ghost" onClick={() => load(true)} disabled={loading}>{loading ? "…" : "Refresh"}</button>
+      {/* News's own Refresh button is disabled for now — folded into App.jsx's single "Refresh all" action via refreshToken */}
     </div>
   );
 
@@ -280,7 +290,7 @@ export function NewsPanel({ symbol = "QQQ", fullHeight = false, compact = false 
 
 // Presentational: compares news direction against options-market positioning.
 // Fed from signalData.newsVsOptions, which App.jsx already fetches each poll.
-export function DivergencePanel({ signal, error, hideHeader = false }) {
+export function DivergencePanel({ signal, error, hideHeader = false, secondsLeft = null, status = null, updatedAt = null }) {
   const nvo = signal?.newsVsOptions;
   const verdictStyle =
     nvo?.verdict === "aligned" ? "green" : nvo?.verdict === "divergent" ? "amber" : "muted";
@@ -333,11 +343,14 @@ export function DivergencePanel({ signal, error, hideHeader = false }) {
     <div className="module">
       <div className="module-header row" style={{ justifyContent: "space-between" }}>
         <div className="section-title" style={{ margin: 0 }}>News vs options</div>
-        {nvo && (
-          <span className={`mono ${verdictStyle}`} style={{ fontSize: 12, fontWeight: 600 }}>
-            {nvo.verdict.toUpperCase()}
-          </span>
-        )}
+        <span className="row" style={{ gap: 8 }}>
+          {nvo && (
+            <span className={`mono ${verdictStyle}`} style={{ fontSize: 12, fontWeight: 600 }}>
+              {nvo.verdict.toUpperCase()}
+            </span>
+          )}
+          <RefetchStatus secondsLeft={secondsLeft} status={status} updatedAt={updatedAt} />
+        </span>
       </div>
       <div className="card">{inner}</div>
     </div>
@@ -347,7 +360,7 @@ export function DivergencePanel({ signal, error, hideHeader = false }) {
 // Presentational: fed from signalData.volSurface (App.jsx's existing /api/signal poll).
 // Skew/term-structure/VRP context, distinct from the single ATM-IV read GreeksPanel
 // already shows — informational only, same as DivergencePanel.
-export function VolSurfacePanel({ signal, error, hideHeader = false }) {
+export function VolSurfacePanel({ signal, error, hideHeader = false, secondsLeft = null, status = null, updatedAt = null }) {
   const vs = signal?.volSurface;
   const pct = (x, dp = 1) => (x == null ? "—" : (x * 100).toFixed(dp) + "%");
   const pts = (x, dp = 1) => (x == null ? "—" : (x >= 0 ? "+" : "") + (x * 100).toFixed(dp) + "pts");
@@ -407,6 +420,7 @@ export function VolSurfacePanel({ signal, error, hideHeader = false }) {
     <div className="module">
       <div className="module-header row" style={{ justifyContent: "space-between" }}>
         <div className="section-title" style={{ margin: 0 }}>Volatility surface</div>
+        <RefetchStatus secondsLeft={secondsLeft} status={status} updatedAt={updatedAt} />
       </div>
       <div className="card">{inner}</div>
     </div>
@@ -416,7 +430,7 @@ export function VolSurfacePanel({ signal, error, hideHeader = false }) {
 // Presentational: fed from signalData.gammaExposure. Dealer gamma positioning —
 // positive net GEX suggests hedging flows dampen moves (pinning near high-gamma
 // strikes); negative suggests hedging amplifies moves. Informational only.
-export function GammaExposurePanel({ signal, error, hideHeader = false }) {
+export function GammaExposurePanel({ signal, error, hideHeader = false, secondsLeft = null, status = null, updatedAt = null }) {
   const gex = signal?.gammaExposure;
   const fmtGex = (n) => (n == null ? "—" : (n >= 0 ? "+" : "") + (n / 1e6).toFixed(2) + "M");
   const regimeLabel = gex?.netGex == null ? "" : gex.netGex >= 0 ? "positive (dampening / pinning)" : "negative (amplifying)";
@@ -460,11 +474,14 @@ export function GammaExposurePanel({ signal, error, hideHeader = false }) {
     <div className="module">
       <div className="module-header row" style={{ justifyContent: "space-between" }}>
         <div className="section-title" style={{ margin: 0 }}>Gamma exposure</div>
-        {gex?.netGex != null && (
-          <span className={`mono ${regimeCls}`} style={{ fontSize: 12, fontWeight: 600 }}>
-            {fmtGex(gex.netGex)}
-          </span>
-        )}
+        <span className="row" style={{ gap: 8 }}>
+          {gex?.netGex != null && (
+            <span className={`mono ${regimeCls}`} style={{ fontSize: 12, fontWeight: 600 }}>
+              {fmtGex(gex.netGex)}
+            </span>
+          )}
+          <RefetchStatus secondsLeft={secondsLeft} status={status} updatedAt={updatedAt} />
+        </span>
       </div>
       <div className="card">{inner}</div>
     </div>
@@ -473,7 +490,7 @@ export function GammaExposurePanel({ signal, error, hideHeader = false }) {
 
 // Presentational: App.jsx owns the /api/greeks + /api/signal fetches so this panel
 // and the chain-table pick highlighting share one request per poll.
-export function GreeksPanel({ greeks, signal, error, secondsLeft, status, hideHeader = false }) {
+export function GreeksPanel({ greeks, signal, error, secondsLeft, status, hideHeader = false, updatedAt = null }) {
   const shell = (body) =>
     hideHeader ? (
       <div style={{ marginTop: 10 }}>{body}</div>
@@ -482,7 +499,7 @@ export function GreeksPanel({ greeks, signal, error, secondsLeft, status, hideHe
         <div className="module-header row" style={{ justifyContent: "space-between" }}>
           <div className="section-title" style={{ margin: 0 }}>Options analysis</div>
           <div className="row">
-            <RefetchStatus secondsLeft={secondsLeft} status={status} />
+            <RefetchStatus secondsLeft={secondsLeft} status={status} updatedAt={updatedAt} />
             {signal && Number.isFinite(signal.optionsScore) && (
               <span className={`mono ${signal.optionsScore <= -40 ? "red" : signal.optionsScore < 0 ? "amber" : "green"}`} style={{ fontSize: 12, fontWeight: 600 }}>
                 {signal.optionsScore === 0 ? "CONDITIONS CLEAR" : `CONDITIONS ${signal.optionsScore.toFixed(1)}`}

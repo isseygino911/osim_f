@@ -13,9 +13,21 @@ export function useCountdown(intervalMs, anchorAt) {
   return Math.max(0, Math.round((anchorAt + intervalMs - now) / 1000));
 }
 
+// "7/25 11:00pm" in the browser's own local time zone — no fixed refresh cadence
+// to count down to anymore, so this replaces the old "next in Ns" countdown.
+function formatUpdatedAt(ms) {
+  const d = new Date(ms);
+  const date = `${d.getMonth() + 1}/${d.getDate()}`;
+  let h = d.getHours();
+  const ampm = h >= 12 ? "pm" : "am";
+  h = h % 12 || 12;
+  const min = String(d.getMinutes()).padStart(2, "0");
+  return `${date} ${h}:${min}${ampm}`;
+}
+
 // status: "success" | "error" | null (null = no fetch has completed yet)
-export function RefetchStatus({ secondsLeft, status }) {
-  if (status == null && secondsLeft == null) return null;
+export function RefetchStatus({ secondsLeft, status, updatedAt }) {
+  if (status == null && secondsLeft == null && updatedAt == null) return null;
   return (
     <span className="row mono muted" style={{ fontSize: 11, gap: 4 }}>
       <AnimatePresence mode="wait">
@@ -35,6 +47,7 @@ export function RefetchStatus({ secondsLeft, status }) {
         )}
       </AnimatePresence>
       {secondsLeft != null && <span>next in {secondsLeft}s</span>}
+      {updatedAt != null && <span>updated: {formatUpdatedAt(updatedAt)}</span>}
     </span>
   );
 }

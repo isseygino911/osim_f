@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How the simulator's /api/signal works</title>
+<meta name="description" content="Traced from server/services/*.js: how the simulator's /api/signal combines technicals, news, and options-chain quality into a buy_call/buy_put/hold verdict.">
+<style>
+
+@font-face {
+  font-family: 'Spectral';
+  src: local('Georgia');
+  font-weight: 600 700;
+}
+
+:root {
+  --paper: #FAF8F4;
+  --ink: #1B1A17;
+  --ink-soft: #55524A;
+  --hairline: #E4DFD3;
+  --card: #FFFFFF;
+  --card-shadow: 0 1px 2px rgba(27,26,23,0.04), 0 4px 16px rgba(27,26,23,0.05);
+
+  --accent: #B8862E;
+  --accent-ink: #6B4E17;
+  --accent-soft: #F3E6C9;
+
+  --tech: #3E6E96;
+  --tech-soft: #E4EDF3;
+  --news: #A24E56;
+  --news-soft: #F5E6E7;
+  --opt: #5C7F52;
+  --opt-soft: #E7EEE2;
+
+  --mono: 'SF Mono', 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace;
+  --serif: Spectral, Georgia, 'Iowan Old Style', 'Palatino Linotype', serif;
+  --sans: -apple-system, 'Segoe UI', system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #14161B;
+    --ink: #EDEAE1;
+    --ink-soft: #A8A399;
+    --hairline: #2C2F37;
+    --card: #1B1E25;
+    --card-shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+
+    --accent: #E0B25C;
+    --accent-ink: #F3D48F;
+    --accent-soft: #3A3222;
+
+    --tech: #7FB0DA;
+    --tech-soft: #202B36;
+    --news: #D08890;
+    --news-soft: #332025;
+    --opt: #9AC08C;
+    --opt-soft: #232B1F;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #14161B; --ink: #EDEAE1; --ink-soft: #A8A399; --hairline: #2C2F37;
+  --card: #1B1E25; --card-shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+  --accent: #E0B25C; --accent-ink: #F3D48F; --accent-soft: #3A3222;
+  --tech: #7FB0DA; --tech-soft: #202B36;
+  --news: #D08890; --news-soft: #332025;
+  --opt: #9AC08C; --opt-soft: #232B1F;
+}
+:root[data-theme="light"] {
+  --paper: #FAF8F4; --ink: #1B1A17; --ink-soft: #55524A; --hairline: #E4DFD3;
+  --card: #FFFFFF; --card-shadow: 0 1px 2px rgba(27,26,23,0.04), 0 4px 16px rgba(27,26,23,0.05);
+  --accent: #B8862E; --accent-ink: #6B4E17; --accent-soft: #F3E6C9;
+  --tech: #3E6E96; --tech-soft: #E4EDF3;
+  --news: #A24E56; --news-soft: #F5E6E7;
+  --opt: #5C7F52; --opt-soft: #E7EEE2;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+a.back-link {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: block;
+  background: var(--paper);
+  border-bottom: 1px solid var(--hairline);
+  padding: 12px 28px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  text-decoration: none;
+}
+a.back-link:hover { color: var(--accent-ink); }
+a.back-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.page {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 56px 28px 120px;
+}
+
+/* ---------- Header ---------- */
+header.masthead {
+  border-bottom: 1px solid var(--hairline);
+  padding-bottom: 28px;
+  margin-bottom: 40px;
+}
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent-ink);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.eyebrow .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); display: inline-block; }
+h1 {
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: clamp(28px, 4.2vw, 40px);
+  line-height: 1.12;
+  margin: 0 0 12px;
+  text-wrap: balance;
+  letter-spacing: -0.01em;
+}
+.subhead {
+  font-size: 16px;
+  color: var(--ink-soft);
+  max-width: 62ch;
+  margin: 0;
+}
+.subhead b { color: var(--ink); font-weight: 600; }
+
+/* ---------- Section labels ---------- */
+.stage-num {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+section.stage { margin-bottom: 6px; }
+.stage-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin: 44px 0 14px;
+}
+.stage-head h2 {
+  font-family: var(--serif);
+  font-size: 21px;
+  font-weight: 700;
+  margin: 0;
+  letter-spacing: -0.005em;
+}
+.stage-head .stage-num {
+  font-weight: 600;
+  min-width: 20px;
+}
+.stage-desc {
+  color: var(--ink-soft);
+  font-size: 14.5px;
+  max-width: 68ch;
+  margin: -4px 0 16px;
+}
+
+/* ---------- Source strip (stage 1) ---------- */
+.sources {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+.source-card {
+  background: var(--card);
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  padding: 14px 16px;
+  box-shadow: var(--card-shadow);
+}
+.source-card .label {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  margin-bottom: 6px;
+}
+.source-card .value {
+  font-size: 14px;
+  font-weight: 600;
+}
+.source-card .sub {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  margin-top: 4px;
+}
+
+/* ---------- Three-track pipeline ---------- */
+.tracks {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  align-items: stretch;
+}
+.track {
+  border-radius: 12px;
+  padding: 18px 18px 20px;
+  border: 1px solid var(--hairline);
+  background: var(--card);
+  box-shadow: var(--card-shadow);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.track::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 4px;
+  border-radius: 12px 12px 0 0;
+}
+.track.tech::before { background: var(--tech); }
+.track.news::before { background: var(--news); }
+.track.opt::before { background: var(--opt); }
+
+.track .kicker {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+.track.tech .kicker { color: var(--tech); }
+.track.news .kicker { color: var(--news); }
+.track.opt .kicker { color: var(--opt); }
+
+.track h3 {
+  font-family: var(--serif);
+  font-size: 16.5px;
+  margin: 0;
+  font-weight: 700;
+}
+.track p { font-size: 13.3px; color: var(--ink-soft); margin: 0; }
+
+.pill-row { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 2px; }
+.pill {
+  font-family: var(--mono);
+  font-size: 10.8px;
+  padding: 3px 8px;
+  border-radius: 100px;
+  border: 1px solid var(--hairline);
+  color: var(--ink-soft);
+  background: transparent;
+}
+.track.tech .pill { border-color: color-mix(in srgb, var(--tech) 35%, var(--hairline)); }
+.track.news .pill { border-color: color-mix(in srgb, var(--news) 35%, var(--hairline)); }
+.track.opt .pill { border-color: color-mix(in srgb, var(--opt) 35%, var(--hairline)); }
+
+.formula {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--paper);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  white-space: pre;
+  line-height: 1.6;
+  margin-top: 4px;
+}
+.track.tech .formula { background: var(--tech-soft); border-color: transparent; }
+.track.news .formula { background: var(--news-soft); border-color: transparent; }
+.track.opt .formula { background: var(--opt-soft); border-color: transparent; }
+
+.track .output {
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px dashed var(--hairline);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.track.tech .output { color: var(--tech); }
+.track.news .output { color: var(--news); }
+.track.opt .output { color: var(--opt); }
+.output .range { color: var(--ink-soft); font-weight: 400; font-size: 11px; }
+
+/* ---------- Convergence arrows ---------- */
+.converge {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  padding: 10px 0 0;
+}
+.converge svg { width: 100%; height: 44px; display: block; }
+.converge .col { display: flex; justify-content: center; }
+
+/* ---------- Combine card ---------- */
+.combine-card {
+  background: var(--card);
+  border: 1.5px solid var(--accent);
+  border-radius: 14px;
+  padding: 24px 26px;
+  box-shadow: var(--card-shadow);
+  position: relative;
+}
+.combine-card .kicker {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent-ink);
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+.combine-formula {
+  font-family: var(--mono);
+  font-size: 14px;
+  background: var(--accent-soft);
+  border-radius: 10px;
+  padding: 16px 18px;
+  line-height: 1.75;
+  margin: 10px 0;
+  overflow-x: auto;
+  white-space: pre;
+}
+.combine-formula .op { color: var(--accent-ink); font-weight: 700; }
+.combine-note { font-size: 13px; color: var(--ink-soft); margin: 10px 0 0; }
+
+.threshold-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-top: 16px;
+}
+.threshold {
+  border-radius: 9px;
+  padding: 10px 12px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+.threshold.buy { background: var(--opt-soft); color: var(--opt); }
+.threshold.hold { background: var(--hairline); color: var(--ink-soft); }
+.threshold.sell { background: var(--news-soft); color: var(--news); }
+.threshold .range { display: block; font-weight: 400; font-size: 11px; margin-top: 3px; opacity: 0.85; }
+
+/* ---------- Branch (contract selection) ---------- */
+.branch-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+  margin-top: 6px;
+}
+.branch-card {
+  background: var(--card);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  padding: 18px 20px;
+  box-shadow: var(--card-shadow);
+}
+.branch-card h4 {
+  font-family: var(--serif);
+  font-size: 15.5px;
+  margin: 0 0 8px;
+}
+.branch-card ol {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13.3px;
+  color: var(--ink-soft);
+}
+.branch-card ol li { margin-bottom: 6px; }
+.branch-card ol li b { color: var(--ink); font-weight: 600; }
+.branch-card code {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--paper);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+/* ---------- Divergence ---------- */
+.diverge-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
+}
+.diverge-card {
+  border-radius: 10px;
+  padding: 14px 16px;
+  font-size: 13px;
+  border: 1px solid var(--hairline);
+  background: var(--card);
+}
+.diverge-card .v {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 12.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 6px;
+  display: block;
+}
+.diverge-card.aligned .v { color: var(--opt); }
+.diverge-card.divergent .v { color: var(--news); }
+.diverge-card.neutral .v { color: var(--ink-soft); }
+.diverge-card p { margin: 0; color: var(--ink-soft); }
+
+/* ---------- Footer note ---------- */
+.provenance {
+  margin-top: 56px;
+  padding-top: 20px;
+  border-top: 1px solid var(--hairline);
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+.provenance .mark {
+  font-family: var(--mono);
+  color: var(--accent-ink);
+  flex-shrink: 0;
+}
+
+/* ---------- Responsive ---------- */
+@media (max-width: 760px) {
+  .tracks, .sources, .converge, .threshold-row, .branch-grid, .diverge-grid {
+    grid-template-columns: 1fr;
+  }
+  .converge { display: none; }
+}
+
+::selection { background: var(--accent-soft); }
+</style>
+</head>
+<body>
+
+<a class="back-link" href="/">&larr; Back to simulator</a>
+
+<div class="page">
+
+  <header class="masthead">
+    <div class="eyebrow"><span class="dot"></span>CODEBASE WALKTHROUGH &middot; server/services/*.js &middot; this simulator, live</div>
+    <h1>How <code style="font-family:inherit;">GET /api/signal</code> turns a Tradier snapshot into one call</h1>
+    <p class="subhead">Traced directly from <code style="font-family:inherit;">strategy.service.js</code>, <code style="font-family:inherit;">indicators.service.js</code>, <code style="font-family:inherit;">greeks.service.js</code> and <code style="font-family:inherit;">news.service.js</code>. <b>Two tracks feed direction</b> &mdash; technicals and news &mdash; and a third, options-chain quality, only ever <b>dampens</b> that direction. Every formula below is quoted from the actual code, not a generic pattern.</p>
+  </header>
+
+  <!-- STAGE 1 — SOURCES -->
+  <section class="stage">
+    <div class="stage-head"><span class="stage-num">01</span><h2>Snapshot &mdash; Tradier REST, no MCP/browser involved</h2></div>
+    <p class="stage-desc"><code style="font-family:inherit;">tradier.service.js</code> fetches directly on <code style="font-family:inherit;">POST /api/refresh</code> or the 3-minute background loop; the signal endpoint then reads whatever snapshot is already on disk.</p>
+    <div class="sources">
+      <div class="source-card">
+        <div class="label">Quote</div>
+        <div class="value">/markets/quotes</div>
+        <div class="sub">quote.last &rarr; price &middot; prevclose &middot; description &rarr; name</div>
+      </div>
+      <div class="source-card">
+        <div class="label">Option chain</div>
+        <div class="value">/markets/options/chains?greeks=true</div>
+        <div class="sub">expirations kept 3&ndash;15 DTE &middot; 10 strikes/exp (5 below + 5 at-or-above spot)</div>
+      </div>
+      <div class="source-card">
+        <div class="label">Candles</div>
+        <div class="value">/markets/history + /markets/timesales</div>
+        <div class="sub">daily native (400d) &middot; 5m native (58d cap) &middot; 15m/30m/1h/4h aggregated from 5m</div>
+      </div>
+      <div class="source-card" style="grid-column: span 3;">
+        <div class="label">Headlines</div>
+        <div class="value">news.service.js &mdash; 7-feed RSS sweep, 10-min cache</div>
+        <div class="sub">CNBC Markets/Tech &middot; MarketWatch Top &amp; Pulse &middot; Investing.com &middot; Yahoo Finance &middot; Seeking Alpha &mdash; 15 items/feed, shared across symbols</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- STAGE 2 — THREE TRACKS -->
+  <section class="stage">
+    <div class="stage-head"><span class="stage-num">02</span><h2>Score each dimension independently</h2></div>
+    <p class="stage-desc">Technicals and news form the <i>direction</i> in <code style="font-family:inherit;">computeSignal</code> (strategy.service.js). Options conditions never touch direction &mdash; it's a separate multiplicative dampener, computed by <code style="font-family:inherit;">computeOptionsScore</code>.</p>
+
+    <div class="tracks">
+      <!-- TECH -->
+      <div class="track tech">
+        <div class="kicker">indicators.service.js</div>
+        <h3>8 indicators computed, 7 vote</h3>
+        <p>Each voter casts one vote in [-1, 1]; the average of <i>whichever votes exist</i> (not a fixed denominator) is scaled &times;100.</p>
+        <div class="pill-row">
+          <span class="pill">RSI14 &rarr; continuous</span><span class="pill">MACD 12/26/9 &rarr; &plusmn;1</span><span class="pill">SMA20 vs 50 &rarr; &plusmn;1</span>
+          <span class="pill">Bollinger 20,2 &rarr; &plusmn;1/0</span><span class="pill">Stochastic 14,3 &rarr; &plusmn;0.3&ndash;1</span><span class="pill">VWAP &rarr; &plusmn;0.5</span><span class="pill">ADX14 &plusmn;DI &rarr; &plusmn;0.75</span>
+        </div>
+        <div class="formula">RSI vote = rsi&lt;30 ? +1 : rsi&gt;70 ? -1
+         : (50 - rsi) / 20      // continuous 30-70
+
+ADX vote = adx&gt;=25
+  ? (+DI&gt;-DI ? +0.75 : -0.75) : 0
+
+score = (&Sigma; votes / votes.length) &times; 100</div>
+        <p style="font-size:12px;"><b>StochRSI is computed but deliberately excluded</b> &mdash; code comment: would "triple-count" RSI momentum. VWAP vote is skipped entirely on the 1d interval (no intraday session).</p>
+        <div class="output">techScore<span class="range">labels: &ge;40 strong_buy &middot; &ge;12 buy &middot; &le;-12 sell &middot; &le;-40 strong_sell</span></div>
+      </div>
+
+      <!-- NEWS -->
+      <div class="track news">
+        <div class="kicker">relevance.service.js + news.service.js</div>
+        <h3>Headlines, relevance-weighted</h3>
+        <p>Per-symbol keyword tiers, word-boundary regex. Items scoring &lt;25 relevance are discarded before scoring direction.</p>
+        <div class="pill-row">
+          <span class="pill">phrase overrides &plusmn;2</span><span class="pill">~25 bullish words</span><span class="pill">~25 bearish words</span><span class="pill">Gemini overlay (optional)</span>
+        </div>
+        <div class="formula">relevance = min(100, round(
+  topWeight + 0.5&times;&Sigma; otherWeights))
+
+dirScore = clamp(phraseScore
+  + sign(pos-neg)&times;min(|pos-neg|,5), -5, 5)
+
+overall = &Sigma;(dirScore/5 &times; relevance)
+          / &Sigma; relevance &times; 100</div>
+        <p style="font-size:12px;">Pool = <code style="font-family:inherit">relevant</code> items if &ge;5 exist, else all gathered items. If <code style="font-family:inherit">GEMINI_API_KEY</code> is set, a 1-call batch analysis races an 8s timeout and overwrites these fields on success (<code style="font-family:inherit">analysisSource: "gemini"</code>).</p>
+        <div class="output">newsScore<span class="range">bullish &gt;10 &middot; bearish &lt;-10</span></div>
+      </div>
+
+      <!-- OPTIONS -->
+      <div class="track opt">
+        <div class="kicker">strategy.service.js &middot; computeOptionsScore</div>
+        <h3>Penalty-only dampener</h3>
+        <p>From the nearest 3&ndash;10 DTE chain (a stricter internal window than the 3&ndash;15 DTE fetch window): ATM IV, avg bid/ask spread, ATM open interest.</p>
+        <div class="pill-row">
+          <span class="pill">IV &gt; 35% &rarr; penalty</span><span class="pill">spread &gt; 2% &rarr; penalty</span><span class="pill">OI &lt; 100 &rarr; flat 20</span>
+        </div>
+        <div class="formula">pIv     = clamp01((atmIv-0.35)/0.35) &times; 50
+pSpread = clamp01((spr-0.02)/0.08) &times; 30
+pOi     = liquidityOk ? 0 : 20
+
+optionsScore = -min(100, pIv+pSpread+pOi)</div>
+        <p style="font-size:12px;">Always &le; 0. IV saturates the full 50pt penalty at 70% IV; spread saturates the full 30pt penalty at 10%. <code style="font-family:inherit">liquidityOk</code> fails <i>open</i> (true) when no OI data exists at all.</p>
+        <div class="output">optionsScore<span class="range">range [-100, 0]</span></div>
+      </div>
+    </div>
+
+    <div class="converge">
+      <div class="col"></div>
+      <div class="col"></div>
+      <div class="col"></div>
+    </div>
+  </section>
+
+  <!-- STAGE 3 — COMBINE -->
+  <section class="stage">
+    <div class="stage-head"><span class="stage-num">03</span><h2>Combine into one verdict</h2></div>
+    <p class="stage-desc"><code style="font-family:inherit;">computeSignal</code>, strategy.service.js line ~161. This is <b>not</b> a 3-way weighted average &mdash; options conditions multiply, they don't add. The multiplier ranges 0.5&times;&ndash;1.0&times;, so a bad chain can halve conviction but never flip the direction tech+news already set.</p>
+
+    <div class="combine-card">
+      <div class="kicker">The combine step &mdash; verbatim from strategy.service.js</div>
+      <div class="combine-formula">directionalScore <span class="op">=</span> techScore &times; 0.75  +  newsScore &times; 0.25
+
+combinedScore    <span class="op">=</span> directionalScore &times; (1 + optionsScore / 200)</div>
+      <p class="combine-note">Worked example &mdash; strong bullish setup, but a rich/thin chain: techScore 55, newsScore 40 &rarr; directionalScore 51.25. If optionsScore is &minus;40 (elevated IV, wide spreads) the multiplier is (1 + &minus;40/200) = 0.8 &rarr; <b style="color:var(--ink)">combinedScore 41</b>. Still buy_call &mdash; just less confident than the raw technicals suggested. A greeks-free snapshot leaves optionsScore at 0, multiplier 1.0, no change at all.</p>
+
+      <div class="threshold-row">
+        <div class="threshold sell">BUY PUT<span class="range">combinedScore &le; &minus;30</span></div>
+        <div class="threshold hold">HOLD<span class="range">&minus;30 &lt; score &lt; 30</span></div>
+        <div class="threshold buy">BUY CALL<span class="range">combinedScore &ge; 30</span></div>
+      </div>
+      <p class="combine-note" style="margin-top:14px;">Threshold is <code style="font-family:inherit">RISK.minSignalScoreToTrade = 30</code> &mdash; the same <code style="font-family:inherit">RISK</code> object (strategy.service.js) that governs position sizing, stop-loss (35%), take-profit (60%), and max open positions (3). There's no separate "sell" action on an open position &mdash; that's <code style="font-family:inherit">decideExits</code>, driven by stop-loss/take-profit, not this score.</p>
+    </div>
+  </section>
+
+  <!-- STAGE 4 — DIVERGENCE (informational) -->
+  <section class="stage">
+    <div class="stage-head"><span class="stage-num">04</span><h2>newsVsOptions <span style="font-family: var(--sans); font-weight: 400; font-size: 14px; color: var(--ink-soft);">&mdash; side-channel inside computeSignal, never touches combinedScore/action</span></h2></div>
+    <p class="stage-desc"><code style="font-family:inherit;">computeOptionsBias</code> (greeks.service.js) finds the 25-delta call/put (0.15 delta tolerance), reads IV skew and put/call OI ratio, then <code style="font-family:inherit;">assessDivergence</code> compares that bias to newsScore.</p>
+    <div class="formula" style="max-width:100%; margin-bottom:14px;">skewBias = clamp(-100,100, -(ivSkew - 0.03)/0.05 &times; 100)   // baseline put-skew 0.03
+oiBias   = clamp(-100,100, -log2(oiRatio / 1.2) &times; 100)     // baseline put/call OI 1.2
+bias     = 0.7&times;skewBias + 0.3&times;oiBias  (or whichever exists alone)</div>
+    <div class="diverge-grid">
+      <div class="diverge-card aligned">
+        <span class="v">Aligned</span>
+        <p>sign(newsScore) === sign(bias) &mdash; news and options positioning lean the same way.</p>
+      </div>
+      <div class="diverge-card divergent">
+        <span class="v">Divergent</span>
+        <p>Bullish news + bearish bias &rarr; contrarian caution on calls. Bearish news + bullish bias &rarr; downside could be sharp, puts relatively cheap.</p>
+      </div>
+      <div class="diverge-card neutral">
+        <span class="v">Neutral</span>
+        <p>|newsScore| &lt; 10 or |bias| &lt; 15 (DIVERGENCE_NEWS_MIN / DIVERGENCE_BIAS_MIN) &mdash; not enough conviction on one side to compare.</p>
+      </div>
+    </div>
+    <p class="stage-desc" style="margin-top:14px;"><code style="font-family:inherit;">computeSignal</code>'s response also bundles <code style="font-family:inherit;">volSurface</code> (25&Delta;/10&Delta; skew, term structure, vol risk premium) and <code style="font-family:inherit;">gammaExposure</code> (net dealer GEX, zero-gamma strike) &mdash; both computed the same call, both purely informational.</p>
+  </section>
+
+  <!-- STAGE 5 — CONTRACT SELECTION -->
+  <section class="stage">
+    <div class="stage-head"><span class="stage-num">05</span><h2><code style="font-family:inherit;">decideTrade</code> &mdash; turns the verdict into an order</h2></div>
+    <p class="stage-desc">Runs only when autopilot is enabled and <code style="font-family:inherit;">signal.action !== "hold"</code>, after guard checks: daily loss &le; &minus;15% blocks, 3 open positions blocks. <code style="font-family:inherit;">GET /api/greeks</code>'s preview panel runs the same picker year-round, win or lose, just to show what <i>would</i> be picked.</p>
+    <div class="branch-grid">
+      <div class="branch-card">
+        <h4>Expiration &mdash; pickExpiration</h4>
+        <ol>
+          <li>Walk 3&ndash;10 DTE candidates <b>nearest first</b> (the stricter internal window, not the 3&ndash;15 DTE fetch window).</li>
+          <li>Skip any where ATM <code>dailyThetaPctAtm &gt; RISK.maxDailyThetaPct (0.06)</code> &mdash; too much daily decay.</li>
+          <li>Unless it's the <b>last</b> candidate in the window &mdash; then use it anyway rather than return nothing.</li>
+        </ol>
+      </div>
+      <div class="branch-card">
+        <h4>Strike &mdash; pickStrikeByDelta</h4>
+        <ol>
+          <li>Discard strikes with <code>OI &lt; RISK.minOpenInterest (100)</code> or <code>spread &gt; RISK.maxSpreadPct (0.10)</code>.</li>
+          <li>Of what survives, pick <code>|delta|</code> closest to <code>RISK.targetDelta = 0.40</code>.</li>
+          <li>No delta data at all &rarr; <code>pickStrike</code> fallback, 1%-OTM by price (<code>otmPct = 0.01</code>).</li>
+        </ol>
+      </div>
+      <div class="branch-card">
+        <h4>Position size</h4>
+        <ol>
+          <li><code>qty = floor(min(equity &times; RISK.maxPositionPctOfEquity (0.35), cash) / (mid &times; 100))</code></li>
+          <li>Autopilot runs on a 1-minute tick, per-symbol isolated $10k paper portfolio.</li>
+        </ol>
+      </div>
+      <div class="branch-card">
+        <h4>Exit &mdash; decideExits</h4>
+        <ol>
+          <li>Runs <b>every tick regardless of enabled state</b> &mdash; stop-loss <code>RISK.stopLossPct (0.35)</code>, take-profit <code>RISK.takeProfitPct (0.6)</code>.</li>
+          <li>Not driven by combinedScore at all &mdash; purely P&amp;L-based on the open position's mark.</li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <div class="provenance">
+    <span class="mark">&#9651;</span>
+    <span>Traced from this repo's <code style="font-family:inherit;">server/services/</code> &mdash; <code style="font-family:inherit;">tradier.service.js</code> (fetch), <code style="font-family:inherit;">indicators.service.js</code> + <code style="font-family:inherit;">relevance.service.js</code>/<code style="font-family:inherit;">news.service.js</code> (the two scoring tracks), <code style="font-family:inherit;">greeks.service.js</code> (Black-Scholes fill-in, chain quality, bias), <code style="font-family:inherit;">strategy.service.js</code> (the single <code style="font-family:inherit;">RISK</code> config, combine formula, trade/exit decisions) &mdash; as called by <code style="font-family:inherit;">GET /api/signal</code>, <code style="font-family:inherit;">GET /api/greeks</code>, and the autopilot loop. No Robinhood or other MCP connector is involved anywhere in this path.</span>
+  </div>
+
+</div>
+</body>
+</html>

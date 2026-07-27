@@ -1,4 +1,13 @@
-import { useState, useMemo, useRef, useEffect } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  createChart,
+  createSeriesMarkers,
+  CandlestickSeries,
+  HistogramSeries,
+  LineSeries,
+  LineStyle,
+  CrosshairMode,
+} from "lightweight-charts";
 import { INDICATORS, PANE_HEIGHT } from "./indicatorConfig.js";
 import { loadKey, saveKey } from "./storage.js";
 
@@ -6,6 +15,7 @@ const UP = "#3DDC84";
 const DOWN = "#FF5C5C";
 const AXIS = "#8A9099";
 const GRID = "#1A1D21";
+const BG = "#0B0D0F";
 
 const K_PANE_ORDER = "qqq-sim-pane-order";
 const K_PANE_HEIGHTS = "qqq-sim-pane-heights";
@@ -13,19 +23,21 @@ const K_AVWAP_ANCHOR = "qqq-sim-avwap-anchor";
 
 const VPVR_BIN_COUNT = 24;
 const VPVR_MAX_WIDTH_FRAC = 0.25; // widest bin reaches this fraction of the plot width
+const VPVR_POC_COLOR = "#E8A33D";
+const VPVR_BIN_COLOR = "#4C8DFF";
+const AVWAP_COLOR = "#FFB86C";
 
 // clamp range for drag-to-resize, per pane type
 const PRICE_HEIGHT_RANGE = [160, 900];
 const OSC_HEIGHT_RANGE = [50, 400];
 
-// left/right must match across every pane's svg so bars line up vertically
-const PAD_X = { left: 56, right: 8 };
-const PRICE_PAD = { ...PAD_X, top: 10, bottom: 20 };
-const OSC_PAD = { ...PAD_X, top: 10, bottom: 10 };
+const HEADER_H = 26; // height of the overlay drag-handle/title strip at the top of each pane
 
 // "price" (the candle/volume chart) plus one entry per oscillator sub-pane
 const OSC_PANES = [...new Set(INDICATORS.filter((c) => c.pane !== "price").map((c) => c.pane))];
 const ALL_PANES = ["price", ...OSC_PANES];
+
+const isNum = (v) => v != null && Number.isFinite(v);
 
 // Drops pane keys that no longer exist and appends any new ones at the end,
 // so a stale/partial localStorage value never hides a pane.
@@ -56,44 +68,45 @@ function sanitizeHeights(h) {
   return out;
 }
 
-const isNum = (v) => v != null && Number.isFinite(v);
+// Unix seconds for lightweight-charts' `Time` type. `bars[i].t` <-> `series[key][i]` index
+// alignment is used only here, at the data boundary, to derive each point's own timestamp —
+// nothing downstream keys off array position again (the library keys everything by `time`).
+const toTime = (iso) => Math.floor(new Date(iso).getTime() / 1000);
 
-// Indicator series are null-padded at the head (SMA 50 has 49 leading nulls) and
-// may be shorter than `bars` if the two endpoints briefly disagree, so the pen
-// lifts on every gap rather than drawing a line down to zero.
-function buildPath(values, n, xFn, yFn) {
-  let d = "";
-  let pen = false;
-  for (let i = 0; i < n; i++) {
-    const v = values?.[i];
-    if (!isNum(v)) {
-      pen = false;
-      continue;
+function paneDomain(cfg, series, n) {
+  if (cfg.domain) return cfg.domain;
+  const keys = cfg.histogram ? [...cfg.series, cfg.histogram] : cfg.series;
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const k of keys) {
+    const arr = series?.[k];
+    if (!arr) continue;
+    for (let i = 0; i < n; i++) {
+      const v = arr[i];
+      if (!isNum(v)) continue;
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
     }
-    d += `${pen ? "L" : "M"}${xFn(i).toFixed(1)},${yFn(v).toFixed(1)} `;
-    pen = true;
   }
-  return d.trim();
+  if (lo === Infinity) return [0, 1];
+  if (cfg.symmetric) {
+    const m = (Math.max(Math.abs(lo), Math.abs(hi)) || 1) * 1.15;
+    return [-m, m];
+  }
+  const pad = (hi - lo) * 0.12 || Math.abs(hi) * 0.1 || 1;
+  return [lo - pad, hi + pad];
 }
 
-// Closed polygon between two series — one subpath per contiguous run.
-function buildBandPath(upper, lower, n, xFn, yFn) {
-  let d = "";
-  let run = [];
-  const flush = () => {
-    if (run.length >= 2) {
-      d += "M" + run.map((i) => `${xFn(i).toFixed(1)},${yFn(upper[i]).toFixed(1)}`).join("L");
-      d += "L" + run.slice().reverse().map((i) => `${xFn(i).toFixed(1)},${yFn(lower[i]).toFixed(1)}`).join("L");
-      d += "Z ";
-    }
-    run = [];
-  };
-  for (let i = 0; i < n; i++) {
-    if (isNum(upper?.[i]) && isNum(lower?.[i])) run.push(i);
-    else flush();
+// Line series don't accept `null` values — omit the point entirely to create a gap,
+// equivalent to the old SVG build's "pen lift" behavior on null-padded/short arrays.
+function toLineData(values, bars) {
+  const out = [];
+  for (let i = 0; i < bars.length; i++) {
+    const v = values?.[i];
+    if (!isNum(v)) continue;
+    out.push({ time: toTime(bars[i].t), value: v });
   }
-  flush();
-  return d.trim();
+  return out;
 }
 
 function DragHandle({ onDragStart, onDragEnd }) {
@@ -147,138 +160,255 @@ function ChartTooltip({ bar, interval, legend, x, y, containerW }) {
   );
 }
 
-const TICK_PX = 60; // roughly one tick per this many px of plot height
-const MIN_TICKS = 5;
-const MAX_TICKS = 12;
+// ---------------------------------------------------------------------------
+// Series primitives (v5 Series Primitives API) — lightweight-charts has no
+// native series type for either of these, so both are canvas-rendered and
+// attached directly to the candlestick series.
+// ---------------------------------------------------------------------------
 
-// Evenly spaced axis ticks, scaled to the pane's actual plotted height so a taller
-// (drag-resized) pane shows proportionally more labels instead of a fixed count. `extra`
-// values (e.g. an oscillator's guide lines) are always included even if off-grid.
-function axisTicks(d0, d1, plotHeightPx, extra = []) {
-  const count = Math.max(MIN_TICKS, Math.min(MAX_TICKS, Math.round(plotHeightPx / TICK_PX) + 1));
-  const ticks = new Set(Array.from({ length: count }, (_, i) => d0 + ((d1 - d0) * i) / (count - 1)));
-  for (const v of extra) ticks.add(v);
-  return Array.from(ticks).sort((a, b) => a - b);
+// Bollinger-style translucent fill between two line series (e.g. bbUpper/bbLower).
+// The lines themselves are still drawn as regular LineSeries for crisp strokes +
+// crosshair snapping; this primitive only paints the band fill beneath them.
+class BandFillPrimitive {
+  constructor(color) {
+    this._color = color;
+    this._upper = [];
+    this._lower = [];
+    this._series = null;
+    this._chart = null;
+    this._requestUpdate = null;
+    this._paneViews = [new BandFillPaneView(this)];
+  }
+  setData(upper, lower) {
+    this._upper = upper;
+    this._lower = lower;
+    this._requestUpdate?.();
+  }
+  attached({ series, chart, requestUpdate }) {
+    this._series = series;
+    this._chart = chart;
+    this._requestUpdate = requestUpdate;
+  }
+  detached() {
+    this._series = null;
+    this._chart = null;
+  }
+  updateAllViews() {}
+  paneViews() {
+    return this._paneViews;
+  }
 }
 
-function paneDomain(cfg, series, n) {
-  if (cfg.domain) return cfg.domain;
-  const keys = cfg.histogram ? [...cfg.series, cfg.histogram] : cfg.series;
-  let lo = Infinity;
-  let hi = -Infinity;
-  for (const k of keys) {
-    const arr = series?.[k];
-    if (!arr) continue;
-    for (let i = 0; i < n; i++) {
-      const v = arr[i];
-      if (!isNum(v)) continue;
-      if (v < lo) lo = v;
-      if (v > hi) hi = v;
+class BandFillPaneView {
+  constructor(primitive) {
+    this._primitive = primitive;
+  }
+  zOrder() {
+    return "bottom";
+  }
+  renderer() {
+    const p = this._primitive;
+    if (!p._series || !p._chart) return null;
+    return new BandFillRenderer(p._upper, p._lower, p._series, p._chart, p._color);
+  }
+}
+
+class BandFillRenderer {
+  constructor(upper, lower, series, chart, color) {
+    this._upper = upper;
+    this._lower = lower;
+    this._series = series;
+    this._chart = chart;
+    this._color = color;
+  }
+  draw(target) {
+    const { _upper: upper, _lower: lower, _series: series, _chart: chart, _color: color } = this;
+    if (!upper.length || !lower.length) return;
+    const timeScale = chart.timeScale();
+    const lowerByTime = new Map(lower.map((p) => [p.time, p.value]));
+    target.useMediaCoordinateSpace(({ context: ctx }) => {
+      // one filled subpath per contiguous run of (upper,lower) points that both resolve
+      // to on-screen coordinates — mirrors the old SVG's per-run band polygon behavior.
+      let run = [];
+      const flush = () => {
+        if (run.length < 2) {
+          run = [];
+          return;
+        }
+        ctx.beginPath();
+        ctx.moveTo(run[0].x, run[0].yu);
+        for (const pt of run) ctx.lineTo(pt.x, pt.yu);
+        for (let i = run.length - 1; i >= 0; i--) ctx.lineTo(run[i].x, run[i].yl);
+        ctx.closePath();
+        ctx.fillStyle = color;
+        ctx.globalAlpha = 0.08;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        run = [];
+      };
+      for (const point of upper) {
+        const lowerValue = lowerByTime.get(point.time);
+        const x = timeScale.timeToCoordinate(point.time);
+        const yu = series.priceToCoordinate(point.value);
+        const yl = lowerValue != null ? series.priceToCoordinate(lowerValue) : null;
+        if (x == null || yu == null || yl == null) {
+          flush();
+          continue;
+        }
+        run.push({ x, yu, yl });
+      }
+      flush();
+    });
+  }
+}
+
+// Volume Profile (VPVR): bins the *visible* price range into VPVR_BIN_COUNT buckets by
+// each bar's typical price, accumulates volume per bin, and renders horizontal bars
+// right-aligned to the price pane's edge with the point-of-control bin highlighted.
+class VpvrPrimitive {
+  constructor() {
+    this._bars = [];
+    this._series = null;
+    this._requestUpdate = null;
+    this._paneViews = [new VpvrPaneView(this)];
+  }
+  setData(bars) {
+    this._bars = bars;
+    this._requestUpdate?.();
+  }
+  attached({ series, requestUpdate }) {
+    this._series = series;
+    this._requestUpdate = requestUpdate;
+  }
+  detached() {
+    this._series = null;
+  }
+  updateAllViews() {}
+  paneViews() {
+    return this._paneViews;
+  }
+  // Computed lazily against whatever the price scale currently shows, so the bins
+  // always reflect the live (possibly overlay-stretched) visible price range.
+  compute() {
+    const series = this._series;
+    const bars = this._bars;
+    if (!series || !bars.length) return null;
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const b of bars) {
+      if (b.low < lo) lo = b.low;
+      if (b.high > hi) hi = b.high;
     }
+    if (!(hi > lo)) return null;
+    const binSize = (hi - lo) / VPVR_BIN_COUNT;
+    const bins = Array.from({ length: VPVR_BIN_COUNT }, (_, i) => ({ lo: lo + i * binSize, hi: lo + (i + 1) * binSize, volume: 0 }));
+    for (const b of bars) {
+      const typical = (b.high + b.low + b.close) / 3;
+      let idx = Math.floor((typical - lo) / binSize);
+      if (idx < 0) idx = 0;
+      if (idx >= VPVR_BIN_COUNT) idx = VPVR_BIN_COUNT - 1;
+      bins[idx].volume += b.volume;
+    }
+    const maxBinVol = Math.max(...bins.map((b) => b.volume), 1);
+    let pocIdx = 0;
+    for (let i = 1; i < bins.length; i++) if (bins[i].volume > bins[pocIdx].volume) pocIdx = i;
+    return { bins, maxBinVol, pocIdx };
   }
-  if (lo === Infinity) return [0, 1];
-  if (cfg.symmetric) {
-    const m = (Math.max(Math.abs(lo), Math.abs(hi)) || 1) * 1.15;
-    return [-m, m];
+}
+
+class VpvrPaneView {
+  constructor(primitive) {
+    this._primitive = primitive;
   }
-  const pad = (hi - lo) * 0.12 || Math.abs(hi) * 0.1 || 1;
-  return [lo - pad, hi + pad];
+  zOrder() {
+    return "top";
+  }
+  renderer() {
+    const p = this._primitive;
+    const data = p.compute();
+    return data ? new VpvrRenderer(data, p._series) : null;
+  }
+}
+
+class VpvrRenderer {
+  constructor(data, series) {
+    this._data = data;
+    this._series = series;
+  }
+  draw(target) {
+    const { bins, maxBinVol, pocIdx } = this._data;
+    const series = this._series;
+    target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
+      const plotW = mediaSize.width;
+      for (let i = 0; i < bins.length; i++) {
+        const bin = bins[i];
+        if (bin.volume <= 0) continue;
+        const yTop = series.priceToCoordinate(bin.hi);
+        const yBottom = series.priceToCoordinate(bin.lo);
+        if (yTop == null || yBottom == null) continue;
+        const w = (bin.volume / maxBinVol) * plotW * VPVR_MAX_WIDTH_FRAC;
+        const isPoc = i === pocIdx;
+        ctx.fillStyle = isPoc ? VPVR_POC_COLOR : VPVR_BIN_COLOR;
+        ctx.globalAlpha = isPoc ? 0.4 : 0.15;
+        ctx.fillRect(plotW - w, Math.min(yTop, yBottom), w, Math.max(Math.abs(yBottom - yTop), 1));
+      }
+      ctx.globalAlpha = 1;
+    });
+  }
 }
 
 // bars: [{ t: ISO string, open, high, low, close, volume }], oldest first
 // series: the `series` object from GET /api/indicators (optional)
 // active: array of indicator keys from indicatorConfig to draw (optional)
 export default function Candlestick({ bars, height = 280, series = null, active = [], interval = "1d" }) {
-  const outerRef = useRef(null);
-  const [hover, setHover] = useState(null); // { index, x, clientX, clientY }
-  // pane-local vertical crosshair: { pane: paneKey, y: raw pixel Y inside that pane's svg }
-  const [hoverY, setHoverY] = useState(null);
-  const [width, setWidth] = useState(600);
+  const hostRef = useRef(null); // element lightweight-charts renders into
+  const outerRef = useRef(null); // outer wrapper, used for tooltip/header positioning
+  const chartRef = useRef(null);
+  const candleSeriesRef = useRef(null);
+  const volumeSeriesRef = useRef(null);
+  const overlayLinesRef = useRef(new Map()); // indicator key -> ISeriesApi[]
+  const bandFillRef = useRef(null); // BandFillPrimitive for the active `fill`-config overlay (BB), if any
+  const oscSeriesRef = useRef(new Map()); // pane key -> { lines: ISeriesApi[], histogram: ISeriesApi|null, priceLines: IPriceLine[] }
+  const avwapSeriesRef = useRef(null);
+  const avwapMarkersRef = useRef(null);
+  const vpvrPrimitiveRef = useRef(null);
+  const resizeObserversRef = useRef(new Map()); // pane key -> ResizeObserver
+  const suppressResizePersistRef = useRef(false);
+  const avwapOnRef = useRef(false);
+  const timeToIsoRef = useRef(new Map());
+  const paneHeightsRef = useRef({});
+
   const [order, setOrder] = useState(() => sanitizeOrder(loadKey(K_PANE_ORDER, ALL_PANES)));
   const [dragKey, setDragKey] = useState(null);
   const [dragOverKey, setDragOverKey] = useState(null);
   const [paneHeights, setPaneHeights] = useState(() => sanitizeHeights(loadKey(K_PANE_HEIGHTS, {})));
-  // guards against a leaked mousemove/mouseup pair if a previous drag's mouseup
-  // never fires (mouse released outside the window, tab-switch mid-drag, etc.) —
-  // without this a stale listener keeps resizing its old pane on every future
-  // mouse move, and can even stack with a later legitimate drag
-  const activeResizeRef = useRef(null);
-  // anchored-VWAP anchor bar, stored by timestamp (not index — indices shift as new
-  // candles arrive, the timestamp doesn't)
+  const [hover, setHover] = useState(null); // { index, clientX, clientY }
   const [anchorT, setAnchorT] = useState(() => loadKey(K_AVWAP_ANCHOR, null)?.t ?? null);
-  // discriminates a pane-resize drag from a plain click on the price pane, both of which
-  // start on the same onMouseDown — see beginResize/handlePriceClick
-  const didDragRef = useRef(false);
+  const [paneRects, setPaneRects] = useState({}); // paneKey -> { top, height } in px, relative to outerRef — drives header overlay position
+
+  const avwapOn = active.includes("avwap");
+  const vpvrOn = active.includes("vpvr");
+  const activeCfgs = series ? INDICATORS.filter((c) => active.includes(c.key)) : [];
+  const overlays = activeCfgs.filter((c) => c.pane === "price" && !c.type);
+  const oscCfgByPane = new Map(activeCfgs.filter((c) => c.pane !== "price").map((c) => [c.pane, c]));
+  const visiblePanes = order.filter((k) => k === "price" || oscCfgByPane.has(k));
+  const visiblePanesKey = visiblePanes.join(",");
+  const overlayKeys = overlays.map((c) => c.key).join(",");
+
+  // lightweight-charts' `autoSize: true` fills whatever height the host div's own CSS
+  // box resolves to — an empty div with no explicit height collapses to ~0, which
+  // squashes every pane regardless of pane.setHeight() calls made after creation. The
+  // host must be given the sum of all visible panes' heights explicitly.
+  const totalHeight = visiblePanes.reduce((sum, key) => sum + (paneHeights[key] ?? (key === "price" ? height : PANE_HEIGHT)), 0);
+
+  avwapOnRef.current = avwapOn;
+  paneHeightsRef.current = paneHeights;
 
   // don't spam localStorage on every dragover tick — only once the drag settles
   useEffect(() => {
     if (dragKey) return;
     saveKey(K_PANE_ORDER, order);
   }, [order, dragKey]);
-
-  // unmount safety net: cancel any drag still in flight
-  useEffect(() => () => activeResizeRef.current?.(), []);
-
-  // a stale hover index from a longer previous series (e.g. switching from a symbol
-  // with 60 candles to one with 19) would otherwise index past the end of `bars`
-  useEffect(() => {
-    setHover(null);
-    setHoverY(null);
-  }, [bars]);
-
-  // resync chart width on window resize — the render-time check below only fires
-  // when something else causes a re-render, so a resize with no other state change
-  // would otherwise leave the SVG at its stale width
-  useEffect(() => {
-    function onResize() {
-      if (outerRef.current) setWidth(outerRef.current.clientWidth || width);
-    }
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, [width]);
-
-  // Drag vertically anywhere inside a pane to grow/shrink it — the plotted
-  // content stretches to fill the new height, so e.g. the RSI wave reads more
-  // dramatically the taller you make its pane.
-  function beginResize(e, paneKey, startHeight, [min, max]) {
-    e.preventDefault();
-    activeResizeRef.current?.(); // force-clean any dangling previous drag first
-    const startY = e.clientY;
-    didDragRef.current = false;
-    function onMove(ev) {
-      if (Math.abs(ev.clientY - startY) > 3) didDragRef.current = true;
-      const next = Math.min(max, Math.max(min, Math.round(startHeight + (ev.clientY - startY))));
-      setPaneHeights((h) => (h[paneKey] === next ? h : { ...h, [paneKey]: next }));
-    }
-    function onUp() {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-      window.removeEventListener("blur", onUp);
-      activeResizeRef.current = null;
-      setPaneHeights((h) => {
-        saveKey(K_PANE_HEIGHTS, h);
-        return h;
-      });
-    }
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    window.addEventListener("blur", onUp);
-    activeResizeRef.current = onUp;
-  }
-
-  if (outerRef.current && outerRef.current.clientWidth !== width) {
-    // sync on render without an extra effect/layout pass
-    queueMicrotask(() => setWidth(outerRef.current?.clientWidth || width));
-  }
-
-  const plotW = Math.max(width - PAD_X.left - PAD_X.right, 0);
-
-  const activeCfgs = series ? INDICATORS.filter((c) => active.includes(c.key)) : [];
-  const overlays = activeCfgs.filter((c) => c.pane === "price");
-  const lineOverlays = overlays.filter((c) => !c.type);
-  const oscCfgByPane = new Map(activeCfgs.filter((c) => c.pane !== "price").map((c) => [c.pane, c]));
-  const avwapOn = active.includes("avwap");
-  const vpvrOn = active.includes("vpvr");
 
   // Anchored VWAP: default to the highest-volume bar in the window until the user clicks
   // one. If a previously-anchored timestamp has scrolled out of the current window (new
@@ -306,113 +436,413 @@ export default function Candlestick({ bars, height = 280, series = null, active 
     return out;
   }, [avwapOn, bars, anchorIdx]);
 
-  const overlayKeys = lineOverlays.map((c) => c.key).join(",");
-  const { min, max, candleW, gap } = useMemo(() => {
-    if (!bars.length) return { min: 0, max: 1, candleW: 4, gap: 2 };
-    let lo = Math.min(...bars.map((b) => b.low));
-    let hi = Math.max(...bars.map((b) => b.high));
-    // fold in the enabled price-scale overlays, or Bollinger bands clip
-    for (const cfg of lineOverlays) {
-      for (const k of cfg.series) {
-        const arr = series?.[k];
-        if (!arr) continue;
-        for (let i = 0; i < bars.length; i++) {
-          const v = arr[i];
-          if (!isNum(v)) continue;
-          if (v < lo) lo = v;
-          if (v > hi) hi = v;
-        }
-      }
-    }
-    if (avwapValues) {
-      for (const v of avwapValues) {
-        if (!isNum(v)) continue;
-        if (v < lo) lo = v;
-        if (v > hi) hi = v;
-      }
-    }
-    const pad = (hi - lo) * 0.06 || 1;
-    const slot = plotW / bars.length;
-    return {
-      min: lo - pad,
-      max: hi + pad,
-      candleW: Math.max(Math.min(slot * 0.6, 14), 2),
-      gap: slot,
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bars, plotW, series, overlayKeys, avwapOn, avwapValues]);
-
-  const maxVol = useMemo(() => Math.max(...bars.map((b) => b.volume), 1), [bars]);
-
-  // Volume Profile: bins the visible price range (not the raw candle range) so it reads
-  // consistently with whatever overlays already stretched the price axis.
-  const vpvrBins = useMemo(() => {
-    if (!vpvrOn || !bars.length || max - min < 1e-6) return null;
-    const binSize = (max - min) / VPVR_BIN_COUNT;
-    const bins = Array.from({ length: VPVR_BIN_COUNT }, (_, i) => ({ lo: min + i * binSize, hi: min + (i + 1) * binSize, volume: 0 }));
-    for (const b of bars) {
-      const typical = (b.high + b.low + b.close) / 3;
-      let idx = Math.floor((typical - min) / binSize);
-      if (idx < 0) idx = 0;
-      if (idx >= VPVR_BIN_COUNT) idx = VPVR_BIN_COUNT - 1;
-      bins[idx].volume += b.volume;
-    }
-    const maxBinVol = Math.max(...bins.map((b) => b.volume), 1);
-    let pocIdx = 0;
-    for (let i = 1; i < bins.length; i++) if (bins[i].volume > bins[pocIdx].volume) pocIdx = i;
-    return { bins, maxBinVol, pocIdx };
-  }, [vpvrOn, bars, min, max]);
-
-  // volume strip stays a fixed-height footer; growing the pane extends the
-  // candle area above it, which is what actually makes the chart "longer"
-  const priceHeight = paneHeights.price ?? height;
-  const volH = 44;
-  const priceH = priceHeight - volH - PRICE_PAD.top - PRICE_PAD.bottom;
-  const yPrice = (p) => PRICE_PAD.top + priceH - ((p - min) / (max - min || 1)) * priceH;
-  const priceAtY = (y) => max - ((y - PRICE_PAD.top) / (priceH || 1)) * (max - min || 1);
-  const yVol = (v) => PRICE_PAD.top + priceH + volH - (v / maxVol) * (volH - 4);
-  const xCenter = (i) => PAD_X.left + gap * i + gap / 2;
-
-  function handleMove(e) {
-    if (!outerRef.current) return;
-    const rect = outerRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left - PAD_X.left;
-    const idx = Math.max(0, Math.min(bars.length - 1, Math.round((x - gap / 2) / gap)));
-    setHover({
-      index: idx,
-      x: xCenter(idx),
-      clientX: e.clientX - rect.left,
-      clientY: e.clientY - rect.top,
+  // Recomputes each visible pane's on-screen {top, height} (relative to outerRef) so the
+  // HTML header overlay (drag handle + title) can be positioned right above it. Called
+  // after any layout-affecting change; a rAF is used because pane DOM geometry settles
+  // asynchronously after setHeight()/moveTo() calls.
+  function syncPaneRects() {
+    const chart = chartRef.current;
+    const outer = outerRef.current;
+    if (!chart || !outer) return;
+    requestAnimationFrame(() => {
+      if (!chartRef.current || !outerRef.current) return;
+      const outerRect = outerRef.current.getBoundingClientRect();
+      const next = {};
+      chartRef.current.panes().forEach((pane, i) => {
+        const key = visiblePanesRef.current[i];
+        const el = pane.getHTMLElement();
+        if (!key || !el) return;
+        const r = el.getBoundingClientRect();
+        next[key] = { top: r.top - outerRect.top, height: r.height };
+      });
+      setPaneRects(next);
     });
   }
+  const visiblePanesRef = useRef(visiblePanes);
+  visiblePanesRef.current = visiblePanes;
 
-  // Pane-local vertical position for the horizontal crosshair + axis value badge —
-  // tracked per-pane (via each svg's own onMouseMove) rather than off the outer
-  // container, so it stays correct regardless of pane order/height.
-  function handlePaneMoveY(e, paneKey, paneHeight) {
-    const svgRect = e.currentTarget.getBoundingClientRect();
-    const y = Math.max(0, Math.min(paneHeight, e.clientY - svgRect.top));
-    setHoverY({ pane: paneKey, y });
-  }
+  // ---- chart creation (mount only) -----------------------------------------------
+  useEffect(() => {
+    if (!hostRef.current) return undefined;
+    const chart = createChart(hostRef.current, {
+      autoSize: true,
+      localization: { locale: "en-US" }, // pin explicitly — otherwise falls back to navigator.language
+      layout: {
+        background: { color: BG },
+        textColor: AXIS,
+        fontFamily: "ui-monospace, monospace",
+        panes: { enableResize: true, separatorColor: "#1E2227", separatorHoverColor: "rgba(76,141,255,0.15)" },
+        attributionLogo: false,
+      },
+      grid: { vertLines: { color: GRID }, horzLines: { color: GRID } },
+      rightPriceScale: { borderColor: "#22262B" },
+      // maxBarSpacing caps how wide fitContent() can stretch each candle when there are
+      // very few bars (e.g. the "1D"/"1W" date-range options) — without it, a handful of
+      // bars filling the full chart width blows up the candle body to hundreds of px while
+      // the wick stays pinned to ~1-2px (a fixed-width render, not scaled with barSpacing),
+      // making the wick effectively invisible next to the oversized body.
+      timeScale: { borderColor: "#22262B", timeVisible: true, secondsVisible: false, maxBarSpacing: 40 },
+      crosshair: { mode: CrosshairMode.Normal },
+    });
+    chartRef.current = chart;
 
-  // Click a candle while the AVWAP chip is on to re-anchor it there. Fires after mouseup,
-  // so a pane-resize drag (same onMouseDown) is ruled out via didDragRef rather than by
-  // fighting over which handler runs first.
-  function handlePriceClick() {
-    if (!avwapOn || didDragRef.current || !hover) return;
-    const t = bars[hover.index]?.t;
-    if (t) {
-      setAnchorT(t);
-      saveKey(K_AVWAP_ANCHOR, { t });
+    const candleSeries = chart.addSeries(
+      CandlestickSeries,
+      { upColor: UP, downColor: DOWN, borderUpColor: UP, borderDownColor: DOWN, wickUpColor: UP, wickDownColor: DOWN, priceScaleId: "right" },
+      0
+    );
+    candleSeriesRef.current = candleSeries;
+    candleSeries.priceScale().applyOptions({ scaleMargins: { top: 0.08, bottom: 0.22 } });
+
+    const volumeSeries = chart.addSeries(HistogramSeries, { priceScaleId: "vol", priceFormat: { type: "volume" }, base: 0, lastValueVisible: false, priceLineVisible: false }, 0);
+    volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+    volumeSeriesRef.current = volumeSeries;
+
+    const vpvr = new VpvrPrimitive();
+    candleSeries.attachPrimitive(vpvr);
+    vpvrPrimitiveRef.current = vpvr;
+
+    const bandFill = new BandFillPrimitive("#8A9099");
+    candleSeries.attachPrimitive(bandFill);
+    bandFillRef.current = bandFill;
+
+    chart.subscribeClick((param) => {
+      if (!avwapOnRef.current || !param.time) return;
+      const t = timeToIsoRef.current.get(param.time);
+      if (t) {
+        setAnchorT(t);
+        saveKey(K_AVWAP_ANCHOR, { t });
+      }
+    });
+
+    chart.subscribeCrosshairMove((param) => {
+      if (!param.point || param.logical == null) {
+        setHover(null);
+        return;
+      }
+      const idx = Math.max(0, Math.min(barsRef.current.length - 1, Math.round(param.logical)));
+      const paneTop = paneRectsRef.current[visiblePanesRef.current[param.paneIndex ?? 0]]?.top ?? 0;
+      setHover({ index: idx, clientX: param.point.x, clientY: paneTop + param.point.y });
+    });
+
+    const ro = new ResizeObserver(() => syncPaneRects());
+    ro.observe(hostRef.current);
+    resizeObserversRef.current.set("__host", ro);
+
+    const resizeObservers = resizeObserversRef.current;
+    const overlayLines = overlayLinesRef.current;
+    const oscSeries = oscSeriesRef.current;
+    return () => {
+      resizeObservers.forEach((r) => r.disconnect());
+      resizeObservers.clear();
+      chart.remove();
+      chartRef.current = null;
+      candleSeriesRef.current = null;
+      volumeSeriesRef.current = null;
+      overlayLines.clear();
+      oscSeries.clear();
+      avwapSeriesRef.current = null;
+      avwapMarkersRef.current = null;
+      vpvrPrimitiveRef.current = null;
+      bandFillRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const barsRef = useRef(bars);
+  barsRef.current = bars;
+  const paneRectsRef = useRef(paneRects);
+  paneRectsRef.current = paneRects;
+
+  // a stale hover index from a longer previous series (e.g. switching from a symbol
+  // with 60 candles to one with 19) would otherwise index past the end of `bars`
+  useEffect(() => {
+    setHover(null);
+  }, [bars]);
+
+  // ---- candles + volume data -------------------------------------------------------
+  useEffect(() => {
+    const chart = chartRef.current;
+    const candleSeries = candleSeriesRef.current;
+    const volumeSeries = volumeSeriesRef.current;
+    if (!chart || !candleSeries || !volumeSeries) return;
+    const timeMap = new Map();
+    const candleData = bars.map((b) => {
+      const time = toTime(b.t);
+      timeMap.set(time, b.t);
+      return { time, open: b.open, high: b.high, low: b.low, close: b.close };
+    });
+    const volumeData = bars.map((b) => ({
+      time: toTime(b.t),
+      value: b.volume,
+      color: b.close >= b.open ? "rgba(61,220,132,0.35)" : "rgba(255,92,92,0.35)",
+    }));
+    candleSeries.setData(candleData);
+    volumeSeries.setData(volumeData);
+    timeToIsoRef.current = timeMap;
+    vpvrPrimitiveRef.current?.setData(vpvrOn ? bars : []);
+    // new bar data (symbol switch, interval/range change) should reset the visible
+    // window to fit it — without this the time scale keeps whatever range it had
+    // before, which can leave most of a shorter/differently-ranged series off-screen.
+    chart.timeScale().fitContent();
+  }, [bars, vpvrOn]);
+
+  // ---- price-pane line overlays (SMA/EMA/BB lines/VWAP) + BB band fill -------------
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const map = overlayLinesRef.current;
+    const wantedKeys = new Set(overlays.map((c) => c.key));
+
+    for (const [key, handles] of map) {
+      if (!wantedKeys.has(key)) {
+        for (const s of handles) chart.removeSeries(s);
+        map.delete(key);
+      }
     }
+
+    for (const cfg of overlays) {
+      let handles = map.get(cfg.key);
+      if (!handles) {
+        handles = cfg.series.map((k) =>
+          chart.addSeries(
+            LineSeries,
+            {
+              color: cfg.color,
+              lineWidth: 1.5,
+              priceScaleId: "right",
+              lineStyle: cfg.dashed?.includes(k) ? LineStyle.Dashed : LineStyle.Solid,
+              lastValueVisible: false,
+              priceLineVisible: false,
+              crosshairMarkerVisible: false,
+            },
+            0
+          )
+        );
+        map.set(cfg.key, handles);
+      }
+      cfg.series.forEach((k, i) => handles[i]?.setData(toLineData(series?.[k], bars)));
+    }
+
+    const bbCfg = overlays.find((c) => c.fill);
+    if (bbCfg) {
+      bandFillRef.current?.setData(toLineData(series?.[bbCfg.fill[0]], bars), toLineData(series?.[bbCfg.fill[1]], bars));
+    } else {
+      bandFillRef.current?.setData([], []);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bars, series, overlayKeys]);
+
+  // ---- AVWAP overlay (dashed orange line + triangular anchor marker) --------------
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    if (!avwapValues) {
+      if (avwapSeriesRef.current) {
+        avwapMarkersRef.current?.setMarkers([]);
+        chart.removeSeries(avwapSeriesRef.current);
+        avwapSeriesRef.current = null;
+        avwapMarkersRef.current = null;
+      }
+      return;
+    }
+    if (!avwapSeriesRef.current) {
+      const s = chart.addSeries(
+        LineSeries,
+        {
+          color: AVWAP_COLOR,
+          lineWidth: 1.5,
+          lineStyle: LineStyle.Dashed,
+          priceScaleId: "right",
+          lastValueVisible: false,
+          priceLineVisible: false,
+          crosshairMarkerVisible: false,
+        },
+        0
+      );
+      avwapSeriesRef.current = s;
+      avwapMarkersRef.current = createSeriesMarkers(s, []);
+    }
+    avwapSeriesRef.current.setData(toLineData(avwapValues, bars));
+    if (anchorIdx >= 0 && bars[anchorIdx]) {
+      avwapMarkersRef.current.setMarkers([
+        { time: toTime(bars[anchorIdx].t), position: "belowBar", shape: "arrowUp", color: AVWAP_COLOR, size: 1 },
+      ]);
+    } else {
+      avwapMarkersRef.current.setMarkers([]);
+    }
+  }, [avwapValues, bars, anchorIdx]);
+
+  // ---- oscillator sub-panes: create/destroy series on membership change, always
+  // refresh data + fixed-domain scale + guide lines -----------------------------
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const map = oscSeriesRef.current;
+
+    for (const [paneKey, handles] of map) {
+      if (!oscCfgByPane.has(paneKey)) {
+        for (const s of handles.lines) chart.removeSeries(s);
+        if (handles.histogram) chart.removeSeries(handles.histogram);
+        map.delete(paneKey);
+      }
+    }
+
+    const paneIndexOf = new Map(visiblePanes.map((k, i) => [k, i]));
+
+    for (const paneKey of visiblePanes) {
+      if (paneKey === "price") continue;
+      const cfg = oscCfgByPane.get(paneKey);
+      const paneIndex = paneIndexOf.get(paneKey);
+      let handles = map.get(paneKey);
+      if (!handles) {
+        handles = { lines: [], histogram: null, priceLines: [] };
+        if (cfg.histogram) {
+          handles.histogram = chart.addSeries(
+            HistogramSeries,
+            { priceScaleId: paneKey, base: 0, lastValueVisible: false, priceLineVisible: false },
+            paneIndex
+          );
+        }
+        cfg.series.forEach((k, i) => {
+          const color = cfg.seriesColors?.[k] ?? (i === 0 ? cfg.color : cfg.signalColor || cfg.color);
+          handles.lines.push(
+            chart.addSeries(
+              LineSeries,
+              { color, lineWidth: 1.3, priceScaleId: paneKey, lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false },
+              paneIndex
+            )
+          );
+        });
+        map.set(paneKey, handles);
+      }
+
+      const [d0, d1] = paneDomain(cfg, series, bars.length);
+      const anchorSeries = handles.lines[0] ?? handles.histogram;
+      const priceScale = anchorSeries?.priceScale();
+      priceScale?.applyOptions({ scaleMargins: { top: 0.08, bottom: 0.08 } });
+      // fixed (non-auto-scaling) domain — oscillator panes with a known range (RSI 0-100
+      // etc.) must show that fixed range rather than autoscale to whatever's visible
+      priceScale?.setVisibleRange({ from: d0, to: d1 });
+
+      if (handles.histogram) {
+        handles.histogram.setData(
+          bars
+            .map((b, i) => {
+              const v = series?.[cfg.histogram]?.[i];
+              return isNum(v) ? { time: toTime(b.t), value: v, color: v >= 0 ? UP : DOWN } : null;
+            })
+            .filter(Boolean)
+        );
+      }
+      cfg.series.forEach((k, i) => handles.lines[i]?.setData(toLineData(series?.[k], bars)));
+
+      // guide lines (30/70, 20/80, 25, zero-line) via createPriceLine
+      for (const pl of handles.priceLines) anchorSeries?.removePriceLine?.(pl);
+      handles.priceLines = [];
+      const guideValues = [...(cfg.guides ?? []), ...(cfg.zeroLine ? [0] : [])];
+      for (const g of guideValues) {
+        const pl = anchorSeries?.createPriceLine({
+          price: g,
+          color: GRID,
+          lineWidth: 1,
+          lineStyle: cfg.zeroLine && g === 0 ? LineStyle.Solid : LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: "",
+        });
+        if (pl) handles.priceLines.push(pl);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bars, series, visiblePanesKey]);
+
+  // maps a PaneApi to its logical key by matching series identity — panes carry no
+  // custom id, so "price" is identified by owning the candle series and every
+  // oscillator pane by owning one of its configured line/histogram series.
+  function keyForPane(pane) {
+    if (!pane) return null;
+    const paneSeries = pane.getSeries();
+    if (paneSeries.includes(candleSeriesRef.current)) return "price";
+    for (const [key, handles] of oscSeriesRef.current) {
+      if (handles.lines.some((s) => paneSeries.includes(s)) || (handles.histogram && paneSeries.includes(handles.histogram))) return key;
+    }
+    return null;
   }
 
+  // ---- reconcile chart pane order + restore persisted heights ---------------------
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    for (let target = 0; target < visiblePanes.length; target++) {
+      const panes = chart.panes();
+      if (keyForPane(panes[target]) === visiblePanes[target]) continue;
+      const fromIdx = panes.findIndex((p) => keyForPane(p) === visiblePanes[target]);
+      if (fromIdx !== -1 && fromIdx !== target) panes[fromIdx].moveTo(target);
+    }
+
+    // pane.setHeight() computes a stretch factor from a live snapshot of every pane's
+    // CURRENT height at the moment it's called — so calling it in a loop across panes
+    // is order-dependent and never converges to the requested pixel values (a known
+    // lightweight-charts limitation, see tradingview/lightweight-charts#1847).
+    // setStretchFactor() has no such dependency: passing the desired pixel heights
+    // directly as stretch-factor ratios is deterministic and order-independent.
+    suppressResizePersistRef.current = true;
+    chart.panes().forEach((pane, i) => {
+      const key = visiblePanes[i];
+      if (!key) return;
+      const fallback = key === "price" ? height : PANE_HEIGHT;
+      pane.setStretchFactor(paneHeightsRef.current[key] ?? fallback);
+    });
+    queueMicrotask(() => {
+      suppressResizePersistRef.current = false;
+    });
+
+    // (re)watch each visible pane's HTML element for native drag-resize changes
+    const observers = resizeObserversRef.current;
+    for (const [key, ro] of observers) {
+      if (key !== "__host" && !visiblePanes.includes(key)) {
+        ro.disconnect();
+        observers.delete(key);
+      }
+    }
+    chart.panes().forEach((pane, i) => {
+      const key = visiblePanes[i];
+      if (!key || observers.has(key)) return;
+      const el = pane.getHTMLElement();
+      if (!el) return;
+      const ro = new ResizeObserver(() => {
+        syncPaneRects();
+        if (suppressResizePersistRef.current) return;
+        const [min, max] = key === "price" ? PRICE_HEIGHT_RANGE : OSC_HEIGHT_RANGE;
+        const h = Math.min(max, Math.max(min, Math.round(pane.getHeight())));
+        setPaneHeights((prev) => {
+          if (prev[key] === h) return prev;
+          const next = { ...prev, [key]: h };
+          saveKey(K_PANE_HEIGHTS, next);
+          return next;
+        });
+      });
+      ro.observe(el);
+      observers.set(key, ro);
+    });
+
+    syncPaneRects();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visiblePanesKey, order]);
+
+  // keep header overlay positions in sync with anything that can move panes around
+  // (new bars/series changing pane count indirectly via visiblePanesKey is covered above;
+  // this also covers plain window resizes since ResizeObserver on the host handles that)
+  useLayoutEffect(() => {
+    syncPaneRects();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visiblePanesKey, paneHeights]);
+
+  // ---- drag-and-drop pane reordering (HTML5 DnD on each pane's header) ------------
   function handleDragStart(e, key) {
     setDragKey(key);
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", key); // required by Firefox to start a drag
-    const card = e.currentTarget.closest(".pane-card");
-    if (card) e.dataTransfer.setDragImage(card, 20, 20);
   }
   function handleDragOver(e, overKey) {
     e.preventDefault();
@@ -437,15 +867,9 @@ export default function Candlestick({ bars, height = 280, series = null, active 
   }
 
   const n = bars.length;
-  // clamp defensively: the useEffect above clears stale hover state on a new `bars`
-  // array, but effects run after render, so the render that first receives a shorter
-  // series must not trust an out-of-range hover.index left over from the longer one
   const readIdx = hover && hover.index < n ? hover.index : n - 1;
   const h = bars[readIdx];
   const hUp = h.close >= h.open;
-
-  // y-axis price ticks, scaled to the pane's actual plotted height
-  const ticks = axisTicks(min, max, priceH);
 
   const legend = activeCfgs.map((cfg) => {
     const dec = cfg.domain ? 1 : 2;
@@ -454,7 +878,8 @@ export default function Candlestick({ bars, height = 280, series = null, active 
       const v = avwapValues?.[readIdx];
       text = isNum(v) ? v.toFixed(2) : "—";
     } else if (cfg.type === "profile") {
-      const poc = vpvrBins?.bins[vpvrBins.pocIdx];
+      const vpvr = vpvrPrimitiveRef.current?.compute();
+      const poc = vpvr?.bins[vpvr.pocIdx];
       text = poc ? ((poc.lo + poc.hi) / 2).toFixed(2) + " POC" : "—";
     } else {
       text = cfg.series
@@ -467,18 +892,11 @@ export default function Candlestick({ bars, height = 280, series = null, active 
     return { key: cfg.key, label: cfg.label, color: cfg.color, text };
   });
 
-  const visiblePanes = order.filter((k) => k === "price" || oscCfgByPane.has(k));
+  const paneTitle = (paneKey) => (paneKey === "price" ? "Chart" : oscCfgByPane.get(paneKey)?.paneLabel || oscCfgByPane.get(paneKey)?.label || paneKey);
+  const paneColor = (paneKey) => (paneKey === "price" ? undefined : oscCfgByPane.get(paneKey)?.color);
 
   return (
-    <div
-      ref={outerRef}
-      style={{ position: "relative", width: "100%" }}
-      onMouseMove={handleMove}
-      onMouseLeave={() => {
-        setHover(null);
-        setHoverY(null);
-      }}
-    >
+    <div style={{ position: "relative", width: "100%" }}>
       <div className="row" style={{ justifyContent: "space-between", marginBottom: 4, fontSize: 12 }}>
         <span className="mono">
           O <span className={hUp ? "green" : "red"}>{h.open.toFixed(2)}</span>{"  "}
@@ -504,197 +922,35 @@ export default function Candlestick({ bars, height = 280, series = null, active 
         </div>
       )}
 
-      <div className="pane-stack">
+      <div ref={outerRef} className="pane-card" style={{ position: "relative", width: "100%", padding: 0, overflow: "visible" }}>
+        <div ref={hostRef} style={{ width: "100%", height: totalHeight }} />
+
         {visiblePanes.map((paneKey) => {
+          const rect = paneRects[paneKey];
+          if (!rect) return null;
           const dragging = dragKey === paneKey;
           const isOver = dragOverKey === paneKey && dragKey && dragKey !== paneKey;
-          const cardClass = `pane-card ${dragging ? "dragging" : ""} ${isOver ? "drag-over" : ""}`;
-
-          if (paneKey === "price") {
-            return (
-              <div key="price" className={cardClass} onDragOver={(e) => handleDragOver(e, "price")} onDrop={handleDrop}>
-                <div className="pane-card-header">
-                  <DragHandle onDragStart={(e) => handleDragStart(e, "price")} onDragEnd={handleDragEnd} />
-                  <span className="pane-card-title">Chart</span>
-                </div>
-                <svg
-                  width={width}
-                  height={priceHeight}
-                  style={{ display: "block", cursor: avwapOn ? "crosshair" : "ns-resize" }}
-                  onMouseDown={(e) => beginResize(e, "price", priceHeight, PRICE_HEIGHT_RANGE)}
-                  onMouseMove={(e) => handlePaneMoveY(e, "price", priceHeight)}
-                  onClick={handlePriceClick}
-                >
-                  {ticks.map((t, i) => (
-                    <g key={i}>
-                      <line x1={PAD_X.left} x2={width - PAD_X.right} y1={yPrice(t)} y2={yPrice(t)} stroke={GRID} strokeWidth={1} />
-                      <text x={PAD_X.left - 8} y={yPrice(t)} fill={AXIS} fontSize={10} textAnchor="end" dominantBaseline="middle" fontFamily="ui-monospace, monospace">
-                        {t.toFixed(0)}
-                      </text>
-                    </g>
-                  ))}
-
-                  {vpvrBins && (
-                    <g opacity={0.9}>
-                      {vpvrBins.bins.map((bin, i) => {
-                        if (bin.volume <= 0) return null;
-                        const w = (bin.volume / vpvrBins.maxBinVol) * plotW * VPVR_MAX_WIDTH_FRAC;
-                        const isPoc = i === vpvrBins.pocIdx;
-                        return (
-                          <rect
-                            key={i}
-                            x={width - PAD_X.right - w}
-                            y={yPrice(bin.hi)}
-                            width={w}
-                            height={Math.max(yPrice(bin.lo) - yPrice(bin.hi), 1)}
-                            fill={isPoc ? "#E8A33D" : "#4C8DFF"}
-                            opacity={isPoc ? 0.4 : 0.15}
-                          />
-                        );
-                      })}
-                    </g>
-                  )}
-
-                  {lineOverlays.map((cfg) => (
-                    <g key={cfg.key}>
-                      {cfg.fill && (
-                        <path d={buildBandPath(series[cfg.fill[0]], series[cfg.fill[1]], n, xCenter, yPrice)} fill={cfg.color} opacity={0.08} stroke="none" />
-                      )}
-                      {cfg.series.map((k) => (
-                        <path
-                          key={k}
-                          d={buildPath(series[k], n, xCenter, yPrice)}
-                          fill="none"
-                          stroke={cfg.color}
-                          strokeWidth={1.5}
-                          strokeLinejoin="round"
-                          strokeDasharray={cfg.dashed?.includes(k) ? "4,3" : undefined}
-                          opacity={cfg.fill ? 0.85 : 1}
-                        />
-                      ))}
-                    </g>
-                  ))}
-
-                  {avwapValues && anchorIdx >= 0 && (
-                    <g>
-                      <path d={buildPath(avwapValues, n, xCenter, yPrice)} fill="none" stroke="#FFB86C" strokeWidth={1.5} strokeDasharray="4,3" strokeLinejoin="round" />
-                      <path
-                        d={(() => {
-                          const cx = xCenter(anchorIdx);
-                          const y = yPrice(bars[anchorIdx].low) + 10;
-                          return `M${cx - 4},${y} L${cx + 4},${y} L${cx},${y - 6} Z`;
-                        })()}
-                        fill="#FFB86C"
-                      />
-                    </g>
-                  )}
-
-                  {bars.map((b, i) => {
-                    const up = b.close >= b.open;
-                    const color = up ? UP : DOWN;
-                    const cx = xCenter(i);
-                    const bodyTop = yPrice(Math.max(b.open, b.close));
-                    const bodyBottom = yPrice(Math.min(b.open, b.close));
-                    const bodyH = Math.max(bodyBottom - bodyTop, 1);
-                    return (
-                      <g key={b.t}>
-                        <line x1={cx} x2={cx} y1={yPrice(b.high)} y2={yPrice(b.low)} stroke={color} strokeWidth={1} />
-                        <rect x={cx - candleW / 2} y={bodyTop} width={candleW} height={bodyH} fill={color} rx={1} />
-                        <rect x={cx - candleW / 2} y={yVol(b.volume)} width={candleW} height={PRICE_PAD.top + priceH + volH - yVol(b.volume)} fill={color} opacity={0.35} />
-                      </g>
-                    );
-                  })}
-
-                  {hover && <line x1={hover.x} x2={hover.x} y1={0} y2={priceHeight} stroke={AXIS} strokeWidth={1} strokeDasharray="3,3" opacity={0.6} />}
-
-                  {hoverY?.pane === "price" && hoverY.y >= PRICE_PAD.top && hoverY.y <= PRICE_PAD.top + priceH && (
-                    <g>
-                      <line x1={PAD_X.left} x2={width - PAD_X.right} y1={hoverY.y} y2={hoverY.y} stroke={AXIS} strokeWidth={1} strokeDasharray="3,3" opacity={0.6} />
-                      <rect x={0} y={hoverY.y - 8} width={PAD_X.left - 2} height={16} rx={3} fill="#4C8DFF" />
-                      <text x={PAD_X.left - 6} y={hoverY.y} fill="#0B0D0F" fontSize={10} fontWeight={600} textAnchor="end" dominantBaseline="middle" fontFamily="ui-monospace, monospace">
-                        {priceAtY(hoverY.y).toFixed(2)}
-                      </text>
-                    </g>
-                  )}
-                </svg>
-              </div>
-            );
-          }
-
-          const cfg = oscCfgByPane.get(paneKey);
-          const paneHeight = paneHeights[paneKey] ?? PANE_HEIGHT;
-          const [d0, d1] = paneDomain(cfg, series, n);
-          const plotTop = OSC_PAD.top;
-          const plotH = paneHeight - OSC_PAD.top - OSC_PAD.bottom;
-          const y = (v) => plotTop + plotH - ((v - d0) / (d1 - d0 || 1)) * plotH;
-          const valueAtY = (py) => d1 - ((py - plotTop) / (plotH || 1)) * (d1 - d0 || 1);
-          const edgeLabels = axisTicks(d0, d1, plotH, cfg.guides ?? []);
-
           return (
-            <div key={paneKey} className={cardClass} onDragOver={(e) => handleDragOver(e, paneKey)} onDrop={handleDrop}>
-              <div className="pane-card-header">
+            <div
+              key={paneKey}
+              className={`pane-card-header ${dragging ? "dragging" : ""} ${isOver ? "drag-over" : ""}`}
+              style={{
+                position: "absolute",
+                left: 0,
+                right: 0,
+                top: rect.top,
+                height: HEADER_H,
+                background: "linear-gradient(180deg, rgba(16,19,22,0.92), rgba(16,19,22,0))",
+                pointerEvents: "none",
+                zIndex: 3,
+              }}
+              onDragOver={(e) => handleDragOver(e, paneKey)}
+              onDrop={handleDrop}
+            >
+              <div style={{ pointerEvents: "auto", display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 8px" }}>
                 <DragHandle onDragStart={(e) => handleDragStart(e, paneKey)} onDragEnd={handleDragEnd} />
-                <span className="pane-card-title" style={{ color: cfg.color }}>{cfg.paneLabel || cfg.label}</span>
+                <span className="pane-card-title" style={{ color: paneColor(paneKey) }}>{paneTitle(paneKey)}</span>
               </div>
-              <svg
-                width={width}
-                height={paneHeight}
-                style={{ display: "block", cursor: "ns-resize" }}
-                onMouseDown={(e) => beginResize(e, paneKey, paneHeight, OSC_HEIGHT_RANGE)}
-                onMouseMove={(e) => handlePaneMoveY(e, paneKey, paneHeight)}
-              >
-                {edgeLabels.map((g, i) => (
-                  <text key={`l${i}`} x={PAD_X.left - 8} y={y(g)} fill={AXIS} fontSize={9} textAnchor="end" dominantBaseline="middle" fontFamily="ui-monospace, monospace">
-                    {Math.abs(g) >= 100 || Number.isInteger(g) ? g.toFixed(0) : g.toFixed(2)}
-                  </text>
-                ))}
-                {cfg.guides?.map((g) => (
-                  <line key={`g${g}`} x1={PAD_X.left} x2={width - PAD_X.right} y1={y(g)} y2={y(g)} stroke={GRID} strokeWidth={1} strokeDasharray="3,3" />
-                ))}
-                {cfg.zeroLine && <line x1={PAD_X.left} x2={width - PAD_X.right} y1={y(0)} y2={y(0)} stroke={GRID} strokeWidth={1} />}
-
-                {cfg.histogram &&
-                  bars.map((b, i) => {
-                    const v = series[cfg.histogram]?.[i];
-                    if (!isNum(v)) return null;
-                    const yv = y(v);
-                    const y0 = y(0);
-                    return (
-                      <rect
-                        key={b.t}
-                        x={xCenter(i) - candleW / 2}
-                        y={Math.min(yv, y0)}
-                        width={candleW}
-                        height={Math.max(Math.abs(yv - y0), 1)}
-                        fill={v >= 0 ? UP : DOWN}
-                        opacity={0.6}
-                      />
-                    );
-                  })}
-
-                {cfg.series.map((k, i) => (
-                  <path
-                    key={k}
-                    d={buildPath(series[k], n, xCenter, y)}
-                    fill="none"
-                    stroke={cfg.seriesColors?.[k] ?? (i === 0 ? cfg.color : cfg.signalColor || cfg.color)}
-                    strokeWidth={1.3}
-                    strokeLinejoin="round"
-                  />
-                ))}
-
-                {hover && <line x1={hover.x} x2={hover.x} y1={0} y2={paneHeight} stroke={AXIS} strokeWidth={1} strokeDasharray="3,3" opacity={0.6} />}
-
-                {hoverY?.pane === paneKey && hoverY.y >= plotTop && hoverY.y <= plotTop + plotH && (
-                  <g>
-                    <line x1={PAD_X.left} x2={width - PAD_X.right} y1={hoverY.y} y2={hoverY.y} stroke={AXIS} strokeWidth={1} strokeDasharray="3,3" opacity={0.6} />
-                    <rect x={0} y={hoverY.y - 8} width={PAD_X.left - 2} height={16} rx={3} fill={cfg.color} />
-                    <text x={PAD_X.left - 6} y={hoverY.y} fill="#0B0D0F" fontSize={9} fontWeight={600} textAnchor="end" dominantBaseline="middle" fontFamily="ui-monospace, monospace">
-                      {valueAtY(hoverY.y).toFixed(Math.abs(valueAtY(hoverY.y)) >= 100 ? 0 : 2)}
-                    </text>
-                  </g>
-                )}
-              </svg>
             </div>
           );
         })}
@@ -707,7 +963,7 @@ export default function Candlestick({ bars, height = 280, series = null, active 
           legend={legend}
           x={hover.clientX}
           y={hover.clientY}
-          containerW={width}
+          containerW={outerRef.current?.clientWidth ?? 600}
         />
       )}
     </div>

@@ -704,6 +704,16 @@ export default function App() {
               />
               <button type="submit" className="ghost" title="Fetch fresh market data for this symbol">Go</button>
             </form>
+            <a
+              href="/docs/how-it-works.html"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="ghost"
+              style={{ textDecoration: "none", display: "inline-flex", alignItems: "center" }}
+              title="How the signal score is computed"
+            >
+              How it works
+            </a>
           </div>
           {searchError && <div style={{ color: "#FF9B9B", fontSize: 12, marginTop: 4 }}>{searchError}</div>}
           {recentSymbols.length > 0 && (

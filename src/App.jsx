@@ -199,6 +199,34 @@ function NewsTabIcon() {
     </svg>
   );
 }
+function SearchIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+      <circle cx="11" cy="11" r="7" />
+      <line x1="21" y1="21" x2="16.65" y2="16.65" />
+    </svg>
+  );
+}
+function RefreshIcon({ spinning }) {
+  return (
+    <svg
+      viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+      style={spinning ? { animation: "spin .7s linear infinite", transformOrigin: "center" } : undefined}
+    >
+      <path d="M20 11a8 8 0 1 0-2.34 5.66" />
+      <polyline points="20 4 20 11 13 11" />
+    </svg>
+  );
+}
+function SettingsIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+      <circle cx="5" cy="12" r="1.5" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
+      <circle cx="19" cy="12" r="1.5" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
 
 const TABS = [
   { key: "chart", label: "Chart", Icon: ChartTabIcon },
@@ -848,15 +876,26 @@ export default function App() {
             background: var(--bg-page);
             border-bottom: 1px solid var(--border-hairline);
           }
-          .m-header-left { display:flex; align-items:center; gap:8px; min-height:44px; padding:4px 2px; }
-          .m-ticker { font-size:15px; font-weight:700; }
+          .m-header-left { display:flex; align-items:center; gap:6px; min-height:44px; padding:4px 6px 4px 2px; color:var(--text-muted); border-radius:var(--radius-pill); }
+          .m-header-left:active { background:var(--bg-input); }
+          .m-header-search-icon { display:flex; flex-shrink:0; color:var(--text-muted); }
+          .m-ticker { font-size:15px; font-weight:700; color:var(--text-primary); }
           .m-chg-pill { font-size:10px; font-weight:600; padding:2px 6px; border-radius:var(--radius-pill); }
           .m-chg-pill.up { background:rgba(61,220,132,.15); color:var(--green); }
           .m-chg-pill.down { background:rgba(255,92,92,.15); color:var(--red); }
-          .m-price { font-size:16px; font-family:var(--font-mono); font-weight:600; transition:color .5s ease; }
+          .m-header-right { display:flex; align-items:center; gap:8px; }
+          .m-price { font-size:15px; font-family:var(--font-mono); font-weight:600; transition:color .5s ease; }
           .m-price.flash-up { color:var(--green); transition:color 60ms ease; }
           .m-price.flash-down { color:var(--red); transition:color 60ms ease; }
           .m-account-btn { width:44px; height:44px; display:flex; align-items:center; justify-content:center; background:transparent; border:none; color:var(--text-muted); }
+          .m-refresh-btn {
+            display:flex; align-items:center; gap:5px; flex-shrink:0;
+            height:30px; padding:0 10px; border-radius:var(--radius-pill);
+            background:var(--bg-input); border:1px solid var(--border-strong); color:var(--text-primary);
+            font-size:11px; font-weight:600;
+          }
+          .m-refresh-btn:disabled { opacity:.5; }
+          .m-refresh-label { white-space:nowrap; }
 
           /* search slide-down panel */
           .m-search-panel { padding: var(--space-3); background:var(--bg-card); border-bottom:1px solid var(--border-hairline); margin: 0 calc(-1 * var(--space-3)); }
@@ -890,7 +929,12 @@ export default function App() {
 
           /* chart tab */
           .m-chart-card { position: relative; }
-          .m-chart-settings-btn { position:absolute; top:8px; right:8px; z-index:2; width:32px; height:32px; border-radius:var(--radius-md); display:flex; align-items:center; justify-content:center; padding:0; }
+          .m-chart-settings-btn {
+            position:absolute; top:8px; right:8px; z-index:2;
+            height:30px; border-radius:var(--radius-pill);
+            display:flex; align-items:center; gap:5px; padding:0 10px 0 8px;
+            font-size:11px; font-weight:600;
+          }
 
           /* trade tab: expiration chip row scroll-snap */
           .m-exp-row { display:flex; gap:6px; overflow-x:auto; -webkit-overflow-scrolling:touch; scroll-snap-type:x proximity; padding-bottom:4px; }
@@ -925,19 +969,34 @@ export default function App() {
             <button
               type="button"
               className="m-header-left"
-              style={{ background: "transparent", border: "none", padding: "4px 2px" }}
+              style={{ background: "transparent" }}
               onClick={() => setMSearchOpen((o) => !o)}
               aria-expanded={mSearchOpen}
+              aria-label="Search for a symbol"
               title="Search symbol"
             >
-              <span className="m-ticker">{symbol ?? "…"}</span>
+              <span className="m-header-search-icon"><SearchIcon /></span>
+              <span className="m-ticker">{symbol ?? "Search"}</span>
               {quote && (
                 <span className={`m-chg-pill ${up ? "up" : "down"}`}>{fmtPct(quote.changePct)}</span>
               )}
             </button>
-            <span className={`m-price mono ${priceFlash === "up" ? "flash-up" : priceFlash === "down" ? "flash-down" : ""}`}>
-              {quote ? fmt$(quote.price) : "—"}
-            </span>
+            <div className="m-header-right">
+              <span className={`m-price mono ${priceFlash === "up" ? "flash-up" : priceFlash === "down" ? "flash-down" : ""}`}>
+                {quote ? fmt$(quote.price) : "—"}
+              </span>
+              <button
+                type="button"
+                className="m-refresh-btn"
+                onClick={() => symbol && triggerRefresh(symbol)}
+                disabled={!symbol}
+                aria-label="Refresh all data for this symbol"
+                title="Clear any other symbol's data and fetch fresh market data for this symbol"
+              >
+                <RefreshIcon spinning={refreshStatus?.status === "running"} />
+                <span className="m-refresh-label">Refresh</span>
+              </button>
+            </div>
             {/* Trading disabled for now — account/positions button hidden from UI */}
           </div>
 
@@ -1034,11 +1093,8 @@ export default function App() {
                     title="Chart settings"
                     aria-label="Chart settings"
                   >
-                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                      <circle cx="5" cy="12" r="1.5" fill="currentColor" stroke="none" />
-                      <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
-                      <circle cx="19" cy="12" r="1.5" fill="currentColor" stroke="none" />
-                    </svg>
+                    <SettingsIcon />
+                    <span>Settings</span>
                   </button>
                   {chartBars.length ? (
                     <Candlestick bars={chartBars} height={280} series={chartSeries} active={activeInd} interval={candleInterval} isMobile />

@@ -717,7 +717,8 @@ export default function App() {
           --tabbar-height: 56px;
           --safe-top: env(safe-area-inset-top, 0px);
           --safe-bottom: env(safe-area-inset-bottom, 0px);
-          --tabbar-total-height: calc(var(--tabbar-height) + var(--safe-bottom));
+          --tabbar-float-gap: var(--space-3); /* gap between the floating pill nav and the safe-area edge */
+          --tabbar-total-height: calc(var(--tabbar-height) + var(--safe-bottom) + var(--tabbar-float-gap));
           --content-bottom-clearance: calc(var(--tabbar-total-height) + var(--space-3));
           --tap-target-min: 44px;
 
@@ -734,6 +735,8 @@ export default function App() {
           --z-modal: 51;
           --z-toast: 60;
         }
+        /* matches .wrap so iOS Safari's toolbar-collapse/bounce never reveals a white gap below the fixed mobile nav */
+        html, body { background:var(--bg-page); }
         .wrap { background:var(--bg-page); color:var(--text-primary); font-family: var(--font-sans); min-height:100vh; padding:20px; box-sizing:border-box; }
         .mono { font-family: var(--font-mono); }
         .muted { color:var(--text-muted); }
@@ -904,25 +907,29 @@ export default function App() {
           .refresh-strip { display:flex; align-items:center; gap:8px; width:100%; height:28px; padding:0 var(--space-3); font-size:11px; border-radius:0; border:none; border-bottom:1px solid var(--border-hairline); background:var(--bg-card); margin: 0 calc(-1 * var(--space-3)); box-sizing:border-box; z-index: var(--z-banner); }
           .refresh-strip-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
-          /* bottom tab bar */
+          /* bottom tab bar — floating rounded-pill dock, not a full-width bar pinned to the raw edge */
           .m-tabbar {
-            position: fixed; left: 0; right: 0; bottom: 0; z-index: var(--z-tabbar);
+            position: fixed; left: var(--space-4); right: var(--space-4);
+            bottom: calc(var(--safe-bottom) + var(--tabbar-float-gap));
+            z-index: var(--z-tabbar);
             display: flex;
-            height: var(--tabbar-total-height);
-            padding-bottom: var(--safe-bottom);
+            gap: 2px;
+            height: var(--tabbar-height);
+            padding: 5px;
+            border-radius: var(--radius-pill);
             background: var(--bg-card);
-            border-top: 1px solid var(--border-default);
+            border: 1px solid var(--border-default);
+            box-shadow: 0 10px 28px rgba(0,0,0,.45);
           }
           .m-tab {
             flex: 1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px;
-            background:transparent; border:none; border-radius:0; color:var(--text-muted);
-            height: var(--tabbar-height); padding: 0;
+            background:transparent; border:none; border-radius:var(--radius-pill); color:var(--text-muted);
+            height: 100%; padding: 0;
             position: relative;
           }
-          .m-tab svg { width:22px; height:22px; }
+          .m-tab svg { width:20px; height:20px; }
           .m-tab-label { font-size:10px; text-transform:uppercase; letter-spacing:.4px; }
-          .m-tab.active { color: var(--accent-blue); }
-          .m-tab.active::before { content:""; position:absolute; top:0; left:20%; right:20%; height:2px; background:var(--accent-blue); border-radius:var(--radius-pill); }
+          .m-tab.active { color: var(--text-primary); background: var(--bg-input); }
 
           /* tab content */
           .m-tab-content { padding-top: var(--space-3); }

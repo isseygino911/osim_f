@@ -257,6 +257,72 @@ function IvRankDiagram() {
   );
 }
 
+// The four SMC diagrams share one zig-zag price path so the concepts read as views of the
+// same chart rather than four unrelated sketches.
+const SMC_PATH = "M10,95 L45,55 L80,80 L115,30 L150,70 L185,25 L220,60 L260,40";
+
+function SmcStructureDiagram() {
+  return (
+    <Frame>
+      <ArrowDefs />
+      <path d={SMC_PATH} fill="none" stroke={C.axis} strokeWidth={1.2} opacity={0.7} />
+      <path d="M45,55 L115,55" stroke={C.up} strokeWidth={1} strokeDasharray="3,3" />
+      <Label x={80} y={51} color={C.up} size={8} anchor="middle">BOS</Label>
+      <path d="M115,30 L185,30" stroke={C.up} strokeWidth={1} strokeDasharray="3,3" />
+      <Label x={150} y={26} color={C.up} size={8} anchor="middle">BOS</Label>
+      <Note x={150} y={70} tx={112} ty={112} color={C.text}>higher low = Strong Low</Note>
+      <Label x={12} y={16}>each new high taken = trend intact</Label>
+    </Frame>
+  );
+}
+
+function SmcObDiagram() {
+  return (
+    <Frame>
+      <ArrowDefs />
+      <rect x={60} y={62} width={200} height={18} fill={C.accent} opacity={0.15} />
+      <rect x={60} y={62} width={200} height={18} fill="none" stroke={C.accent} strokeWidth={1} opacity={0.4} />
+      <path d="M10,100 L60,80 L100,35 L150,25 L200,68 L240,45" fill="none" stroke={C.axis} strokeWidth={1.2} opacity={0.7} />
+      <Note x={200} y={70} tx={150} ty={105} color={C.accent}>price returns to the zone</Note>
+      <Label x={12} y={16}>last opposing candle before the break</Label>
+    </Frame>
+  );
+}
+
+function SmcEqDiagram() {
+  return (
+    <Frame>
+      <ArrowDefs />
+      <path d="M10,90 L60,35 L110,75 L160,34 L210,80 L260,60" fill="none" stroke={C.axis} strokeWidth={1.2} opacity={0.7} />
+      <path d="M60,34 L160,34" stroke="#B57BFF" strokeWidth={1} strokeDasharray="1,3" />
+      <Label x={165} y={31} color="#B57BFF" size={8}>EQH</Label>
+      <Note x={110} y={34} tx={95} ty={108} color={C.text}>stops resting just above</Note>
+      <Label x={12} y={16}>two highs at the same price = liquidity</Label>
+    </Frame>
+  );
+}
+
+function SmcFvgDiagram() {
+  const candles = [
+    [40, 70, 40, C.up],
+    [90, 40, 45, C.up],
+    [140, 20, 35, C.up],
+  ];
+  return (
+    <Frame>
+      <ArrowDefs />
+      <rect x={40} y={40} width={220} height={30} fill={C.accent2} opacity={0.14} />
+      {candles.map(([x, y, h, color], i) => (
+        <g key={i}>
+          <rect x={x} y={y} width={18} height={h} fill={color} opacity={0.75} />
+        </g>
+      ))}
+      <Note x={200} y={55} tx={185} ty={105} color={C.accent2}>untraded gap — often refilled</Note>
+      <Label x={12} y={16}>candle 1's high never met candle 3's low</Label>
+    </Frame>
+  );
+}
+
 export const HELP = {
   sma20: {
     title: "SMA 20",
@@ -393,6 +459,38 @@ export const HELP = {
     how: "Bins the visible price range and sums the volume of every bar whose typical price ((high+low+close)/3) falls in that bin. The tallest bin is the Point of Control (POC).",
     usage: "High-volume price shelves act as support/resistance — strikes placed just beyond a heavy node have a real barrier to break through; the POC is a common magnet price gravitates back toward.",
     Diagram: VpvrDiagram,
+  },
+  smc: {
+    title: "Market Structure (SMC)",
+    what: "Where the market last broke a prior swing high or low — the Smart Money Concepts read of whether the trend is continuing or turning.",
+    read: "A dashed line marks the swing level that got taken out. BOS (Break of Structure) means price broke in the direction it was already going — the trend is intact. CHoCH (Change of Character) means it broke the other way — the first sign the trend may be flipping. Highs and lows are also tagged Strong or Weak: a Strong Low is one the market rallied from hard enough to break the last high; a Weak Low failed to.",
+    how: "Confirmed swing pivots (a bar whose high/low is the extreme of the bars either side of it) are tracked at two scales — a fast internal one and a slower swing one. A close through the last unbroken pivot emits BOS when it continues the prevailing trend and CHoCH when it reverses it.",
+    usage: "CHoCH on the swing scale is the earliest structural warning that a directional option position is on the wrong side; BOS after BOS is confirmation to stay with the trend. Strong lows/highs are the levels worth anchoring a stop beyond.",
+    Diagram: SmcStructureDiagram,
+  },
+  smcOb: {
+    title: "Order Blocks (SMC)",
+    what: "The candle a big move originated from, drawn as a zone that stays on the chart until price trades back through it.",
+    read: "A shaded band extending to the right edge. Blue bands sit below price (demand — where buyers stepped in), red bands above it (supply — where sellers did). Price returning to a band is the setup traders watch; a close straight through it means the zone failed and it disappears from the chart.",
+    how: "On each structure break, the last candle opposing the impulse (between the broken pivot and the bar that broke it) becomes the zone, using its full high-low range. A later close beyond the zone counts as mitigation and removes it; only the newest few per side are kept.",
+    usage: "Untouched zones are natural targets and reversal areas — useful for picking strikes to sell into, or for judging whether a long option still has room before it runs into supply.",
+    Diagram: SmcObDiagram,
+  },
+  smcEq: {
+    title: "Equal Highs / Lows (SMC)",
+    what: "Two swing highs (or lows) that stalled at effectively the same price — a shelf of resting stop orders.",
+    read: "A dotted line joining the two matching pivots, tagged EQH above price or EQL below. The idea is that obvious levels collect stop-loss orders just beyond them, and price often pushes through to trigger those before reversing.",
+    how: "Consecutive swing pivots on the same side are compared; if they sit within 0.1 × ATR of each other they're reported as an equal pair, priced at their midpoint.",
+    usage: "Treat an EQH just overhead as a likely magnet rather than a hard ceiling — a spike through it that immediately fails is the classic liquidity sweep, and a poor place to have just bought calls.",
+    Diagram: SmcEqDiagram,
+  },
+  smcFvg: {
+    title: "Fair Value Gaps (SMC)",
+    what: "A price pocket that a fast move skipped over entirely, leaving an imbalance the market tends to come back and fill.",
+    read: "A translucent amber band. It marks a range where, over three consecutive candles, the middle move was violent enough that the first and third candles' ranges never overlapped — nothing actually traded in between. Gaps price has since traded back through are removed, so what's drawn is what's still open.",
+    how: "For each bar, an unfilled gap exists when bar i's low is above bar i−2's high (bullish) or bar i's high is below bar i−2's low (bearish). Any later bar trading into the pocket fills it and drops it from the list.",
+    usage: "Open gaps below price are common pullback targets and above it common rally targets — helpful for setting a realistic profit target on a short-dated option rather than an arbitrary one.",
+    Diagram: SmcFvgDiagram,
   },
   ivrank: {
     title: "IV Rank / Percentile",

@@ -60,6 +60,14 @@ function ReasonsList({ title, reasons }) {
 
 // Presentational: App.jsx owns the /api/indicators fetch so the chart overlays
 // and this table share a single request per poll.
+// "bullish · CHoCH ↑" — the SMC row's value, mirroring the chart legend's structure chip.
+function smcBiasText(smc) {
+  if (!smc) return null;
+  const last = smc.bias?.lastEvent;
+  const bias = smc.bias?.trend ?? "neutral";
+  return last ? `${bias} · ${last.kind} ${last.direction === "bullish" ? "↑" : "↓"}` : bias;
+}
+
 export function IndicatorsPanel({ data, error, secondsLeft, status, active = null, updatedAt = null }) {
   if (error) {
     return (
@@ -88,7 +96,8 @@ export function IndicatorsPanel({ data, error, secondsLeft, status, active = nul
     );
   }
 
-  const { latest, composite, iv } = data;
+  const { latest, composite, iv, smc } = data;
+  const smcBias = smcBiasText(smc);
   const allRows = [
     ["rsi", "RSI (14)", latest.rsi14?.toFixed(1), Number.isFinite(latest.rsi14) && latest.rsi14 < 30 ? "green" : Number.isFinite(latest.rsi14) && latest.rsi14 > 70 ? "red" : ""],
     ["macd", "MACD", latest.macd?.toFixed(2), latest.macd > latest.macdSignal ? "green" : "red"],
@@ -102,6 +111,7 @@ export function IndicatorsPanel({ data, error, secondsLeft, status, active = nul
     ["adx", "+DI / -DI", `${latest.plusDI?.toFixed(1)} / ${latest.minusDI?.toFixed(1)}`, Number.isFinite(latest.plusDI) && Number.isFinite(latest.minusDI) ? (latest.plusDI > latest.minusDI ? "green" : "red") : ""],
     ["stoch", "Stochastic %K", latest.stochK?.toFixed(1), Number.isFinite(latest.stochK) && latest.stochK < 20 ? "green" : Number.isFinite(latest.stochK) && latest.stochK > 80 ? "red" : ""],
     ["stochrsi", "StochRSI %K / %D", `${latest.stochRsiK?.toFixed(1)} / ${latest.stochRsiD?.toFixed(1)}`, Number.isFinite(latest.stochRsiK) && latest.stochRsiK < 20 ? "green" : Number.isFinite(latest.stochRsiK) && latest.stochRsiK > 80 ? "red" : ""],
+    ["smc", "SMC bias", smcBias, smc?.bias?.trend === "bullish" ? "green" : smc?.bias?.trend === "bearish" ? "red" : ""],
     [null, "IV Rank / %ile", iv == null ? "—" : iv.insufficient ? `insufficient history (${iv.days}d)` : `${iv.ivRank ?? "—"} / ${iv.ivPercentile ?? "—"}`, ""],
   ];
   // null key (IV Rank) is always shown — it's not a chart-overlay indicator, just informational

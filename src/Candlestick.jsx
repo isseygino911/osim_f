@@ -9,6 +9,7 @@ import {
   CrosshairMode,
 } from "lightweight-charts";
 import { INDICATORS, PANE_HEIGHT } from "./indicatorConfig.js";
+import { SmcPrimitive } from "./smcPrimitive.js";
 import { loadKey, saveKey } from "./storage.js";
 
 const UP = "#3DDC84";
@@ -107,6 +108,25 @@ function toLineData(values, bars) {
     out.push({ time: toTime(bars[i].t), value: v });
   }
   return out;
+}
+
+// One-line legend value per SMC chip: the structure chip reads out the current bias and
+// the newest break, the zone chips a live count, EQ the most recent liquidity level.
+function smcLegendText(part, smc) {
+  if (!smc) return "—";
+  if (part === "structure") {
+    const last = smc.bias?.lastEvent;
+    const bias = smc.bias?.trend ?? "neutral";
+    return last ? `${bias} · ${last.kind} ${last.direction === "bullish" ? "↑" : "↓"}` : bias;
+  }
+  if (part === "orderBlocks") {
+    const obs = smc.orderBlocks ?? [];
+    const bull = obs.filter((o) => o.direction === "bullish").length;
+    return `${bull}▲ / ${obs.length - bull}▼`;
+  }
+  if (part === "fvg") return `${(smc.fvg ?? []).length} open`;
+  const level = (smc.equalLevels ?? []).at(-1);
+  return level ? `${level.kind} ${level.price.toFixed(2)}` : "—";
 }
 
 function DragHandle({ onDragStart, onDragEnd, onTouchStart, onTouchMove, onTouchEnd, pulse }) {
@@ -383,8 +403,10 @@ class VpvrRenderer {
 
 // bars: [{ t: ISO string, open, high, low, close, volume }], oldest first
 // series: the `series` object from GET /api/indicators (optional)
+// smc: the top-level `smc` object from the same response — timestamp-anchored, so unlike
+//      `series` it is NOT sliced to the visible date range by the caller (optional)
 // active: array of indicator keys from indicatorConfig to draw (optional)
-export default function Candlestick({ bars, height = 280, series = null, active = [], interval = "1d", isMobile = false }) {
+export default function Candlestick({ bars, height = 280, series = null, smc = null, active = [], interval = "1d", isMobile = false }) {
   const hostRef = useRef(null); // element lightweight-charts renders into
   const outerRef = useRef(null); // outer wrapper, used for tooltip/header positioning
   const chartRef = useRef(null);
@@ -396,6 +418,7 @@ export default function Candlestick({ bars, height = 280, series = null, active 
   const avwapSeriesRef = useRef(null);
   const avwapMarkersRef = useRef(null);
   const vpvrPrimitiveRef = useRef(null);
+  const smcPrimitiveRef = useRef(null);
   const resizeObserversRef = useRef(new Map()); // pane key -> ResizeObserver
   const suppressResizePersistRef = useRef(false);
   const avwapOnRef = useRef(false);
@@ -417,6 +440,8 @@ export default function Candlestick({ bars, height = 280, series = null, active 
   const vpvrOn = active.includes("vpvr");
   const activeCfgs = series ? INDICATORS.filter((c) => active.includes(c.key)) : [];
   const overlays = activeCfgs.filter((c) => c.pane === "price" && !c.type);
+  const smcParts = activeCfgs.filter((c) => c.type === "smc").map((c) => c.smcPart);
+  const smcPartsKey = smcParts.join(",");
   const oscCfgByPane = new Map(activeCfgs.filter((c) => c.pane !== "price").map((c) => [c.pane, c]));
   const visiblePanes = order.filter((k) => k === "price" || oscCfgByPane.has(k));
   const visiblePanesKey = visiblePanes.join(",");
@@ -533,6 +558,10 @@ export default function Candlestick({ bars, height = 280, series = null, active 
     candleSeries.attachPrimitive(bandFill);
     bandFillRef.current = bandFill;
 
+    const smcPrimitive = new SmcPrimitive();
+    candleSeries.attachPrimitive(smcPrimitive);
+    smcPrimitiveRef.current = smcPrimitive;
+
     chart.subscribeClick((param) => {
       if (!avwapOnRef.current || !param.time) return;
       const t = timeToIsoRef.current.get(param.time);
@@ -572,6 +601,7 @@ export default function Candlestick({ bars, height = 280, series = null, active 
       avwapMarkersRef.current = null;
       vpvrPrimitiveRef.current = null;
       bandFillRef.current = null;
+      smcPrimitiveRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -699,6 +729,14 @@ export default function Candlestick({ bars, height = 280, series = null, active 
       avwapMarkersRef.current.setMarkers([]);
     }
   }, [avwapValues, bars, anchorIdx]);
+
+  // ---- SMC overlay (structure/order blocks/equal levels/FVG) ----------------------
+  // Bar times are handed to the primitive so it can resolve an anchor that predates the
+  // visible window to the left edge instead of dropping the shape entirely.
+  useEffect(() => {
+    const parts = smcPartsKey ? smcPartsKey.split(",") : [];
+    smcPrimitiveRef.current?.setData(parts.length ? smc : null, parts, bars.map((b) => toTime(b.t)));
+  }, [bars, smc, smcPartsKey]);
 
   // ---- oscillator sub-panes: create/destroy series on membership change, always
   // refresh data + fixed-domain scale + guide lines -----------------------------
@@ -1015,6 +1053,8 @@ export default function Candlestick({ bars, height = 280, series = null, active 
     if (cfg.type === "avwap") {
       const v = avwapValues?.[readIdx];
       text = isNum(v) ? v.toFixed(2) : "—";
+    } else if (cfg.type === "smc") {
+      text = smcLegendText(cfg.smcPart, smc);
     } else if (cfg.type === "profile") {
       const vpvr = vpvrPrimitiveRef.current?.compute();
       const poc = vpvr?.bins[vpvr.pocIdx];

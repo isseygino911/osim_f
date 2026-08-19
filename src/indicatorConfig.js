@@ -7,8 +7,10 @@
 // null-padded at the head.
 //
 // Optional fields:
-//   type           "avwap" | "profile" — a price-pane overlay Candlestick.jsx computes and
-//                  draws itself rather than reading from `series` (series stays [] for these).
+//   type           "avwap" | "profile" | "smc" — a price-pane overlay Candlestick.jsx draws
+//                  itself rather than reading from `series` (series stays [] for these).
+//                  "smc" entries read the response's top-level `smc` object instead, and name
+//                  which part of it they draw via `smcPart`.
 //   seriesColors   { seriesKey: color } — per-series stroke override, for panes whose lines
 //                  aren't just "primary + signal" (e.g. ADX's three lines).
 
@@ -35,6 +37,10 @@ export const INDICATORS = [
   { key: "vwap", label: "VWAP", pane: "price", color: "#FF8FC7", series: ["vwap"], dashed: ["vwap"] },
   { key: "avwap", label: "AVWAP", pane: "price", color: "#FFB86C", series: [], type: "avwap" },
   { key: "vpvr", label: "VPVR", pane: "price", color: "#4C8DFF", series: [], type: "profile" },
+  { key: "smc", label: "SMC", pane: "price", color: "#7BD88F", series: [], type: "smc", smcPart: "structure" },
+  { key: "smcOb", label: "OB", pane: "price", color: "#4C8DFF", series: [], type: "smc", smcPart: "orderBlocks" },
+  { key: "smcEq", label: "EQ", pane: "price", color: "#B57BFF", series: [], type: "smc", smcPart: "equalLevels" },
+  { key: "smcFvg", label: "FVG", pane: "price", color: "#E8A33D", series: [], type: "smc", smcPart: "fvg" },
 
   {
     key: "rsi",

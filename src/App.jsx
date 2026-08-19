@@ -606,6 +606,8 @@ export default function App() {
   const days = rangeDays(candleRange);
   const chartBars = useMemo(() => sliceByRange(candles, days), [candles, days]);
   const chartSeries = useMemo(() => sliceSeriesByRange(indicators?.series, candles, days), [indicators, candles, days]);
+  // `indicators.smc` deliberately bypasses sliceSeriesByRange — its anchors are timestamps,
+  // not array positions, so trimming it would be meaningless (and lossy at the left edge).
 
   const secondsLeft = useCountdown(polling ? intervalSec * 1000 : null, lastFetchAt);
   const fetchStatus = lastFetchOk == null ? null : lastFetchOk ? "success" : "error";
@@ -1041,7 +1043,7 @@ export default function App() {
                     </svg>
                   </button>
                   {chartBars.length ? (
-                    <Candlestick bars={chartBars} height={280} series={chartSeries} active={activeInd} interval={candleInterval} isMobile />
+                    <Candlestick bars={chartBars} height={280} series={chartSeries} smc={indicators?.smc} active={activeInd} interval={candleInterval} isMobile />
                   ) : (
                     <LoadingScreen />
                   )}
@@ -1304,7 +1306,7 @@ export default function App() {
         </div>
         <div className="card">
           {chartBars.length ? (
-            <Candlestick bars={chartBars} height={520} series={chartSeries} active={activeInd} interval={candleInterval} />
+            <Candlestick bars={chartBars} height={520} series={chartSeries} smc={indicators?.smc} active={activeInd} interval={candleInterval} />
           ) : noData ? (
             <div className="muted" style={{ padding: 20, textAlign: "center" }}>
               No {candleInterval} candles yet for {symbol ?? "this symbol"} — click &ldquo;Go&rdquo; to refresh it.

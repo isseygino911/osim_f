@@ -200,6 +200,16 @@ function NewsTabIcon() {
   );
 }
 
+function RefreshIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 12a8 8 0 0 1 14.5-4.5M20 12a8 8 0 0 1-14.5 4.5" />
+      <polyline points="18.5 3 18.5 7.5 14 7.5" />
+      <polyline points="5.5 21 5.5 16.5 10 16.5" />
+    </svg>
+  );
+}
+
 const TABS = [
   { key: "chart", label: "Chart", Icon: ChartTabIcon },
   { key: "signal", label: "Signal", Icon: SignalTabIcon },
@@ -843,25 +853,41 @@ export default function App() {
           /* sticky compact header */
           .m-header {
             position: sticky; top: 0; z-index: var(--z-sticky-header);
-            display: flex; align-items: center; justify-content: space-between;
-            height: var(--header-height);
+            display: flex; flex-direction: column; align-items: stretch;
+            min-height: var(--header-height);
             margin: 0 calc(-1 * var(--space-3)) 0;
-            padding: 0 var(--space-3);
+            padding: 6px var(--space-3);
+            gap: 6px;
             background: var(--bg-page);
             border-bottom: 1px solid var(--border-hairline);
+            box-sizing: border-box;
           }
-          .m-header-left { display:flex; align-items:center; gap:8px; min-height:44px; padding:4px 2px; }
+          .m-header-top { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+          .m-header-left { display:flex; align-items:center; gap:8px; min-height:32px; padding:4px 2px; flex:0 0 auto; }
           .m-ticker { font-size:15px; font-weight:700; }
           .m-chg-pill { font-size:10px; font-weight:600; padding:2px 6px; border-radius:var(--radius-pill); }
           .m-chg-pill.up { background:rgba(61,220,132,.15); color:var(--green); }
           .m-chg-pill.down { background:rgba(255,92,92,.15); color:var(--red); }
-          .m-price { font-size:16px; font-family:var(--font-mono); font-weight:600; transition:color .5s ease; }
+          .m-price { font-size:16px; font-family:var(--font-mono); font-weight:600; transition:color .5s ease; margin-left:auto; }
           .m-price.flash-up { color:var(--green); transition:color 60ms ease; }
           .m-price.flash-down { color:var(--red); transition:color 60ms ease; }
           .m-account-btn { width:44px; height:44px; display:flex; align-items:center; justify-content:center; background:transparent; border:none; color:var(--text-muted); }
 
-          /* search slide-down panel */
-          .m-search-panel { padding: var(--space-3); background:var(--bg-card); border-bottom:1px solid var(--border-hairline); margin: 0 calc(-1 * var(--space-3)); }
+          /* always-visible search row: input + Go + refresh icon */
+          .m-search-row { display:flex; align-items:center; gap:6px; }
+          .m-search-row .search-input { flex:1; min-width:0; min-height:var(--tap-target-min); box-sizing:border-box; }
+          .m-search-row .ghost { min-height:var(--tap-target-min); padding:6px 12px; flex:0 0 auto; }
+          .m-refresh-btn {
+            flex:0 0 auto; width:var(--tap-target-min); height:var(--tap-target-min);
+            display:flex; align-items:center; justify-content:center;
+            border-radius:var(--radius-md); border:1px solid var(--border-default);
+            background:var(--bg-card); color:var(--text-secondary); padding:0;
+          }
+          .m-refresh-btn svg { width:18px; height:18px; }
+          .m-refresh-btn:disabled { opacity:.5; }
+
+          /* search slide-down panel (recent symbols) */
+          .m-search-panel { padding: 0 var(--space-3) var(--space-3); background:var(--bg-page); }
 
           /* compact refresh strip */
           .refresh-strip { display:flex; align-items:center; gap:8px; width:100%; height:28px; padding:0 var(--space-3); font-size:11px; border-radius:0; border:none; border-bottom:1px solid var(--border-hairline); background:var(--bg-card); margin: 0 calc(-1 * var(--space-3)); box-sizing:border-box; z-index: var(--z-banner); }
@@ -924,54 +950,63 @@ export default function App() {
       {isMobile ? (
         <>
           <div className="m-header">
-            <button
-              type="button"
-              className="m-header-left"
-              style={{ background: "transparent", border: "none", padding: "4px 2px" }}
-              onClick={() => setMSearchOpen((o) => !o)}
-              aria-expanded={mSearchOpen}
-              title="Search symbol"
+            <div className="m-header-top">
+              <button
+                type="button"
+                className="m-header-left"
+                style={{ background: "transparent", border: "none", padding: "4px 2px" }}
+                onClick={() => setMSearchOpen((o) => !o)}
+                aria-expanded={mSearchOpen}
+                title="Recent symbols"
+              >
+                <span className="m-ticker">{symbol ?? "…"}</span>
+                {quote && (
+                  <span className={`m-chg-pill ${up ? "up" : "down"}`}>{fmtPct(quote.changePct)}</span>
+                )}
+              </button>
+              <span className={`m-price mono ${priceFlash === "up" ? "flash-up" : priceFlash === "down" ? "flash-down" : ""}`}>
+                {quote ? fmt$(quote.price) : "—"}
+              </span>
+              {/* Trading disabled for now — account/positions button hidden from UI */}
+            </div>
+
+            <form
+              className="m-search-row"
+              onSubmit={(e) => {
+                e.preventDefault();
+                const sym = String(searchInput || "").trim().toUpperCase();
+                selectSymbol(searchInput);
+                if (SYMBOL_RE.test(sym)) triggerRefresh(sym);
+              }}
             >
-              <span className="m-ticker">{symbol ?? "…"}</span>
-              {quote && (
-                <span className={`m-chg-pill ${up ? "up" : "down"}`}>{fmtPct(quote.changePct)}</span>
-              )}
-            </button>
-            <span className={`m-price mono ${priceFlash === "up" ? "flash-up" : priceFlash === "down" ? "flash-down" : ""}`}>
-              {quote ? fmt$(quote.price) : "—"}
-            </span>
-            {/* Trading disabled for now — account/positions button hidden from UI */}
+              <input
+                className="search-input"
+                type="text"
+                placeholder="Symbol…"
+                maxLength={8}
+                value={searchInput}
+                onChange={(e) => {
+                  setSearchInput(e.target.value);
+                  if (searchError) setSearchError(null);
+                }}
+              />
+              <button type="submit" className="ghost" title="Fetch fresh market data for this symbol">Go</button>
+              <button
+                type="button"
+                className="m-refresh-btn"
+                title="Clear any other symbol's data and fetch fresh market data for this symbol"
+                onClick={() => symbol && triggerRefresh(symbol)}
+                disabled={!symbol}
+                aria-label="Refresh all"
+              >
+                <RefreshIcon />
+              </button>
+            </form>
+            {searchError && <div style={{ color: "#FF9B9B", fontSize: 12, marginTop: 2 }}>{searchError}</div>}
           </div>
 
           {mSearchOpen && (
             <div className="m-search-panel">
-              <form
-                className="row"
-                style={{ gap: 6 }}
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  const sym = String(searchInput || "").trim().toUpperCase();
-                  selectSymbol(searchInput);
-                  if (SYMBOL_RE.test(sym)) triggerRefresh(sym);
-                  setMSearchOpen(false);
-                }}
-              >
-                <input
-                  className="search-input"
-                  type="text"
-                  placeholder="Symbol…"
-                  maxLength={8}
-                  value={searchInput}
-                  onChange={(e) => {
-                    setSearchInput(e.target.value);
-                    if (searchError) setSearchError(null);
-                  }}
-                  style={{ flex: 1 }}
-                  autoFocus
-                />
-                <button type="submit" className="ghost" title="Fetch fresh market data for this symbol">Go</button>
-              </form>
-              {searchError && <div style={{ color: "#FF9B9B", fontSize: 12, marginTop: 4 }}>{searchError}</div>}
               {recentSymbols.length > 0 && (
                 <div className="chip-row" style={{ marginTop: 10 }}>
                   {recentSymbols.map((s) => (
